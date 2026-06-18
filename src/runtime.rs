@@ -2,6 +2,53 @@ use bevy::{gltf::Gltf, prelude::*};
 
 use crate::animation_graph::{AnimGraphEditor, AnimNodeTemplate, AnimValue};
 
+pub struct AnimGraphRuntimePlugin;
+
+impl Plugin for AnimGraphRuntimePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (compile_runtime_graphs, sync_runtime_graphs).chain(),
+        );
+    }
+}
+
+#[derive(Component)]
+pub struct AnimGraphRuntime {
+    pub editor: AnimGraphEditor,
+    pub gltf: Handle<Gltf>,
+    pub graph: Option<Handle<AnimationGraph>>,
+    pub playable_nodes: Vec<AnimationNodeIndex>,
+    pub playable_names: Vec<String>,
+    pub live_clips: Vec<LiveClipNode>,
+    pub live_node_weights: Vec<LiveNodeWeight>,
+    pub status: String,
+}
+
+impl AnimGraphRuntime {
+    pub fn new(editor: AnimGraphEditor, gltf: Handle<Gltf>) -> Self {
+        Self {
+            editor,
+            gltf,
+            graph: None,
+            playable_nodes: Vec::new(),
+            playable_names: Vec::new(),
+            live_clips: Vec::new(),
+            live_node_weights: Vec::new(),
+            status: "Waiting for GLB".to_string(),
+        }
+    }
+
+    pub fn request_rebuild(&mut self) {
+        self.graph = None;
+        self.playable_nodes.clear();
+        self.playable_names.clear();
+        self.live_clips.clear();
+        self.live_node_weights.clear();
+        self.status = "Rebuild requested".to_string();
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct LiveClipNode {
     pub editor_node: egui_graph_edit::NodeId,
@@ -57,6 +104,76 @@ pub struct CompiledEditorGraph {
 pub struct GraphValidation {
     pub can_apply: bool,
     pub message: String,
+}
+
+pub fn compile_runtime_graphs(
+    mut commands: Commands,
+    mut runtimes: Query<(Entity, &mut AnimGraphRuntime, &mut AnimationPlayer)>,
+    gltfs: Res<Assets<Gltf>>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+) {
+    for (entity, mut runtime, mut player) in &mut runtimes {
+        if runtime.graph.is_some() {
+            continue;
+        }
+
+        let Some(gltf) = gltfs.get(&runtime.gltf) else {
+            runtime.status = "Waiting for GLB".to_string();
+            continue;
+        };
+
+        match compile_editor_graph(&runtime.editor, gltf) {
+            Ok(compiled) => {
+                let graph_handle = graphs.add(compiled.graph);
+                runtime.graph = Some(graph_handle.clone());
+                runtime.playable_nodes = compiled.playable_nodes;
+                runtime.playable_names = compiled.playable_names;
+                runtime.live_clips = compiled.live_clips;
+                runtime.live_node_weights = compiled.live_node_weights;
+                runtime.status = format!("Applied graph: {}", compiled.summary);
+
+                commands
+                    .entity(entity)
+                    .insert(AnimationGraphHandle(graph_handle));
+
+                for animation in runtime.playable_nodes.iter().copied() {
+                    if !player.is_playing_animation(animation) {
+                        player.play(animation).repeat();
+                    }
+                }
+            }
+            Err(error) => {
+                runtime.status = format!("Graph apply failed: {error}");
+            }
+        }
+    }
+}
+
+pub fn sync_runtime_graphs(
+    runtimes: Query<(&AnimGraphRuntime, &AnimationGraphHandle)>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut players: Query<(&AnimGraphRuntime, &mut AnimationPlayer)>,
+) {
+    for (runtime, graph_handle) in &runtimes {
+        if let Some(graph) = graphs.get_mut(graph_handle) {
+            sync_animation_graph_weights(&runtime.editor, graph, &runtime.live_node_weights);
+        }
+    }
+
+    for (runtime, mut player) in &mut players {
+        for live_clip in &runtime.live_clips {
+            if !player.is_playing_animation(live_clip.animation) {
+                player.play(live_clip.animation).repeat();
+            }
+
+            let Some(active_animation) = player.animation_mut(live_clip.animation) else {
+                continue;
+            };
+
+            active_animation.set_weight(1.0);
+            active_animation.set_speed(clip_speed(&runtime.editor, live_clip.editor_node));
+        }
+    }
 }
 
 pub fn validate_editor_graph(editor: &AnimGraphEditor, gltf: &Gltf) -> GraphValidation {
