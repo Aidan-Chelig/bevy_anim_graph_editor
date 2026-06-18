@@ -1,11 +1,10 @@
 use bevy::prelude::*;
+use bevy_anim_graph_editor::animation_graph::{AnimGraphEditor, AnimGraphResponse};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use egui_graph_edit::NodeResponse;
 
-mod animation_graph;
 mod preview;
 
-use animation_graph::{AnimGraphEditor, AnimGraphResponse};
 use preview::PreviewState;
 
 fn main() {
