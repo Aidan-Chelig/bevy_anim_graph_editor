@@ -1,0 +1,563 @@
+(
+    graph: (
+        graph: (
+            nodes: [
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 1,
+                            version: 1,
+                        ),
+                        label: "Idle Clip",
+                        inputs: [
+                            ("Clip", (
+                                idx: 1,
+                                version: 1,
+                            )),
+                            ("Speed", (
+                                idx: 2,
+                                version: 1,
+                            )),
+                        ],
+                        outputs: [
+                            ("Pose", (
+                                idx: 1,
+                                version: 1,
+                            )),
+                        ],
+                        user_data: (
+                            template: Clip,
+                            note: "Samples a Bevy animation clip.",
+                        ),
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 2,
+                            version: 1,
+                        ),
+                        label: "Walk Clip",
+                        inputs: [
+                            ("Clip", (
+                                idx: 3,
+                                version: 1,
+                            )),
+                            ("Speed", (
+                                idx: 4,
+                                version: 1,
+                            )),
+                        ],
+                        outputs: [
+                            ("Pose", (
+                                idx: 2,
+                                version: 1,
+                            )),
+                        ],
+                        user_data: (
+                            template: Clip,
+                            note: "Samples a Bevy animation clip.",
+                        ),
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 3,
+                            version: 1,
+                        ),
+                        label: "Speed",
+                        inputs: [
+                            ("Name", (
+                                idx: 5,
+                                version: 1,
+                            )),
+                            ("Value", (
+                                idx: 6,
+                                version: 1,
+                            )),
+                        ],
+                        outputs: [
+                            ("Value", (
+                                idx: 3,
+                                version: 1,
+                            )),
+                        ],
+                        user_data: (
+                            template: FloatParameter,
+                            note: "Reads a numeric graph parameter.",
+                        ),
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 4,
+                            version: 1,
+                        ),
+                        label: "Locomotion Blend",
+                        inputs: [
+                            ("A", (
+                                idx: 7,
+                                version: 1,
+                            )),
+                            ("B", (
+                                idx: 8,
+                                version: 1,
+                            )),
+                            ("Weight", (
+                                idx: 9,
+                                version: 1,
+                            )),
+                        ],
+                        outputs: [
+                            ("Pose", (
+                                idx: 4,
+                                version: 1,
+                            )),
+                        ],
+                        user_data: (
+                            template: Blend,
+                            note: "Interpolates two poses by weight.",
+                        ),
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 5,
+                            version: 1,
+                        ),
+                        label: "Preview Output",
+                        inputs: [
+                            ("Pose", (
+                                idx: 10,
+                                version: 1,
+                            )),
+                        ],
+                        outputs: [],
+                        user_data: (
+                            template: Output,
+                            note: "Final pose used by the preview.",
+                        ),
+                    )),
+                    version: 1,
+                ),
+            ],
+            inputs: [
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 1,
+                            version: 1,
+                        ),
+                        typ: Pose,
+                        value: Text("Idle"),
+                        kind: ConstantOnly,
+                        node: (
+                            idx: 1,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 2,
+                            version: 1,
+                        ),
+                        typ: Float,
+                        value: Float(1.0),
+                        kind: ConnectionOrConstant,
+                        node: (
+                            idx: 1,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 3,
+                            version: 1,
+                        ),
+                        typ: Pose,
+                        value: Text("Walk"),
+                        kind: ConstantOnly,
+                        node: (
+                            idx: 2,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 4,
+                            version: 1,
+                        ),
+                        typ: Float,
+                        value: Float(1.0),
+                        kind: ConnectionOrConstant,
+                        node: (
+                            idx: 2,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 5,
+                            version: 1,
+                        ),
+                        typ: Float,
+                        value: Text("speed"),
+                        kind: ConstantOnly,
+                        node: (
+                            idx: 3,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 6,
+                            version: 1,
+                        ),
+                        typ: Float,
+                        value: Float(1.0),
+                        kind: ConstantOnly,
+                        node: (
+                            idx: 3,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 7,
+                            version: 1,
+                        ),
+                        typ: Pose,
+                        value: r#None,
+                        kind: ConnectionOnly,
+                        node: (
+                            idx: 4,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 8,
+                            version: 1,
+                        ),
+                        typ: Pose,
+                        value: r#None,
+                        kind: ConnectionOnly,
+                        node: (
+                            idx: 4,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 9,
+                            version: 1,
+                        ),
+                        typ: Float,
+                        value: Float(0.5),
+                        kind: ConnectionOrConstant,
+                        node: (
+                            idx: 4,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 10,
+                            version: 1,
+                        ),
+                        typ: Pose,
+                        value: r#None,
+                        kind: ConnectionOnly,
+                        node: (
+                            idx: 5,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+            ],
+            outputs: [
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 1,
+                            version: 1,
+                        ),
+                        node: (
+                            idx: 1,
+                            version: 1,
+                        ),
+                        typ: Pose,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 2,
+                            version: 1,
+                        ),
+                        node: (
+                            idx: 2,
+                            version: 1,
+                        ),
+                        typ: Pose,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 3,
+                            version: 1,
+                        ),
+                        node: (
+                            idx: 3,
+                            version: 1,
+                        ),
+                        typ: Float,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 4,
+                            version: 1,
+                        ),
+                        node: (
+                            idx: 4,
+                            version: 1,
+                        ),
+                        typ: Pose,
+                    )),
+                    version: 1,
+                ),
+            ],
+            connections: [
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: Some((
+                        idx: 1,
+                        version: 1,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        idx: 2,
+                        version: 1,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        idx: 3,
+                        version: 1,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        idx: 4,
+                        version: 1,
+                    )),
+                    version: 1,
+                ),
+            ],
+        ),
+        node_order: [
+            (
+                idx: 4,
+                version: 1,
+            ),
+            (
+                idx: 5,
+                version: 1,
+            ),
+            (
+                idx: 1,
+                version: 1,
+            ),
+            (
+                idx: 2,
+                version: 1,
+            ),
+            (
+                idx: 3,
+                version: 1,
+            ),
+        ],
+        connection_in_progress: None,
+        selected_nodes: [],
+        ongoing_box_selection: None,
+        node_positions: [
+            (
+                value: None,
+                version: 0,
+            ),
+            (
+                value: Some((
+                    x: 80.0,
+                    y: 100.0,
+                )),
+                version: 1,
+            ),
+            (
+                value: Some((
+                    x: 80.0,
+                    y: 320.0,
+                )),
+                version: 1,
+            ),
+            (
+                value: Some((
+                    x: 101.78125,
+                    y: 561.9883,
+                )),
+                version: 1,
+            ),
+            (
+                value: Some((
+                    x: 420.0,
+                    y: 220.0,
+                )),
+                version: 1,
+            ),
+            (
+                value: Some((
+                    x: 760.0,
+                    y: 300.0,
+                )),
+                version: 1,
+            ),
+        ],
+        node_orientations: [
+            (
+                value: None,
+                version: 0,
+            ),
+            (
+                value: Some(LeftToRight),
+                version: 1,
+            ),
+            (
+                value: Some(LeftToRight),
+                version: 1,
+            ),
+            (
+                value: Some(LeftToRight),
+                version: 1,
+            ),
+            (
+                value: Some(LeftToRight),
+                version: 1,
+            ),
+            (
+                value: Some(LeftToRight),
+                version: 1,
+            ),
+        ],
+        node_finder: Some((
+            query: "",
+            position: Some((
+                x: 912.4961,
+                y: 650.45703,
+            )),
+            just_spawned: false,
+            _phantom: (),
+        )),
+        pan_zoom: (
+            pan: (
+                x: -42.871094,
+                y: 4.8867188,
+            ),
+            zoom: 1.0,
+        ),
+        _user_state: (),
+    ),
+    preview_output: None,
+)
