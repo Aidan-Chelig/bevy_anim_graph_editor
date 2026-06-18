@@ -1,16 +1,74 @@
-use bevy::{gltf::Gltf, prelude::*};
+use bevy::{
+    asset::{AssetApp, AssetLoader, LoadContext, io::Reader},
+    gltf::Gltf,
+    prelude::*,
+    reflect::TypePath,
+};
 
-use crate::animation_graph::{AnimGraphEditor, AnimNodeTemplate, AnimValue};
+use crate::animation_graph::{AnimGraphEditor, AnimNodeTemplate, AnimValue, SavedAnimGraph};
 
 pub struct AnimGraphRuntimePlugin;
 
 impl Plugin for AnimGraphRuntimePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (compile_runtime_graphs, sync_runtime_graphs).chain(),
-        );
+        app.init_asset::<AnimGraphProjectAsset>()
+            .register_asset_loader(AnimGraphProjectLoader)
+            .add_systems(
+                Update,
+                (
+                    hydrate_project_runtimes,
+                    compile_runtime_graphs,
+                    sync_runtime_graphs,
+                )
+                    .chain(),
+            );
     }
+}
+
+#[derive(Asset, TypePath)]
+pub struct AnimGraphProjectAsset {
+    pub project: SavedAnimGraph,
+}
+
+#[derive(Component)]
+pub struct AnimGraphProjectRuntime {
+    pub project: Handle<AnimGraphProjectAsset>,
+    pub gltf: Handle<Gltf>,
+}
+
+#[derive(Default, TypePath)]
+pub struct AnimGraphProjectLoader;
+
+impl AssetLoader for AnimGraphProjectLoader {
+    type Asset = AnimGraphProjectAsset;
+    type Settings = ();
+    type Error = AnimGraphProjectLoadError;
+
+    fn load(
+        &self,
+        reader: &mut dyn Reader,
+        _settings: &Self::Settings,
+        _load_context: &mut LoadContext,
+    ) -> impl bevy::tasks::ConditionalSendFuture<Output = Result<Self::Asset, Self::Error>> {
+        async move {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).await?;
+            let project = ron::de::from_bytes(&bytes)?;
+            Ok(AnimGraphProjectAsset { project })
+        }
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["animgraph_editor.ron", "animgraph_project.ron"]
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AnimGraphProjectLoadError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Ron(#[from] ron::error::SpannedError),
 }
 
 #[derive(Component)]
@@ -46,6 +104,14 @@ impl AnimGraphRuntime {
         self.live_clips.clear();
         self.live_node_weights.clear();
         self.status = "Rebuild requested".to_string();
+    }
+
+    pub fn from_project(project: &AnimGraphProjectAsset, gltf: Handle<Gltf>) -> Self {
+        let mut editor = AnimGraphEditor::default();
+        editor.graph = project.project.graph.clone();
+        editor.preview_output = project.project.preview_output;
+        editor.clamp_float_values();
+        Self::new(editor, gltf)
     }
 }
 
@@ -104,6 +170,27 @@ pub struct CompiledEditorGraph {
 pub struct GraphValidation {
     pub can_apply: bool,
     pub message: String,
+}
+
+pub fn hydrate_project_runtimes(
+    mut commands: Commands,
+    projects: Res<Assets<AnimGraphProjectAsset>>,
+    pending: Query<
+        (Entity, &AnimGraphProjectRuntime),
+        (With<AnimationPlayer>, Without<AnimGraphRuntime>),
+    >,
+) {
+    for (entity, pending_runtime) in &pending {
+        let Some(project) = projects.get(&pending_runtime.project) else {
+            continue;
+        };
+        commands
+            .entity(entity)
+            .insert(AnimGraphRuntime::from_project(
+                project,
+                pending_runtime.gltf.clone(),
+            ));
+    }
 }
 
 pub fn compile_runtime_graphs(
