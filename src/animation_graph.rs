@@ -274,6 +274,19 @@ impl NodeDataTrait for AnimNodeData {
             ui.monospace(format!("A: {:.3}  B: {:.3}", 1.0 - weight, weight));
         }
 
+        if matches!(self.template, AnimNodeTemplate::WeightedBlend) {
+            let a = graph_weight_input(graph, node_id, "A Weight", 1.0);
+            let b = graph_weight_input(graph, node_id, "B Weight", 1.0);
+            let sum = a + b;
+            let normalized_a = if sum > f32::EPSILON { a / sum } else { 0.0 };
+            let normalized_b = if sum > f32::EPSILON { b / sum } else { 0.0 };
+            ui.monospace(format!("A raw: {:.3}  B raw: {:.3}", a, b));
+            ui.monospace(format!(
+                "A norm: {:.3}  B norm: {:.3}",
+                normalized_a, normalized_b
+            ));
+        }
+
         if matches!(self.template, AnimNodeTemplate::Transition) {
             let condition =
                 resolve_graph_bool_input(graph, node_id, "Condition", 0).unwrap_or(false);
@@ -299,7 +312,9 @@ impl NodeDataTrait for AnimNodeData {
     ) -> Option<Color32> {
         Some(match self.template {
             AnimNodeTemplate::Clip => Color32::from_rgb(47, 96, 146),
-            AnimNodeTemplate::Blend => Color32::from_rgb(61, 126, 93),
+            AnimNodeTemplate::Blend | AnimNodeTemplate::WeightedBlend => {
+                Color32::from_rgb(61, 126, 93)
+            }
             AnimNodeTemplate::State => Color32::from_rgb(119, 91, 151),
             AnimNodeTemplate::Transition => Color32::from_rgb(143, 99, 55),
             AnimNodeTemplate::FloatParameter | AnimNodeTemplate::BoolParameter => {
@@ -370,6 +385,7 @@ fn collect_pose_node_weights(
                 node_id,
                 "A",
                 1.0 - blend_weight,
+                1.0 - blend_weight,
                 effective_weight,
                 target,
                 weights,
@@ -380,6 +396,44 @@ fn collect_pose_node_weights(
                 node_id,
                 "B",
                 blend_weight,
+                blend_weight,
+                effective_weight,
+                target,
+                weights,
+                depth + 1,
+            );
+        }
+        AnimNodeTemplate::WeightedBlend => {
+            let a_weight = graph_weight_input(graph, node_id, "A Weight", 1.0);
+            let b_weight = graph_weight_input(graph, node_id, "B Weight", 1.0);
+            let sum = a_weight + b_weight;
+            let a_effective = if sum > f32::EPSILON {
+                a_weight / sum
+            } else {
+                0.0
+            };
+            let b_effective = if sum > f32::EPSILON {
+                b_weight / sum
+            } else {
+                0.0
+            };
+            collect_weighted_pose_input(
+                graph,
+                node_id,
+                "A",
+                a_weight,
+                a_effective,
+                effective_weight,
+                target,
+                weights,
+                depth + 1,
+            );
+            collect_weighted_pose_input(
+                graph,
+                node_id,
+                "B",
+                b_weight,
+                b_effective,
                 effective_weight,
                 target,
                 weights,
@@ -391,6 +445,7 @@ fn collect_pose_node_weights(
                 graph,
                 node_id,
                 "Pose",
+                node_weight,
                 node_weight,
                 effective_weight,
                 target,
@@ -407,6 +462,7 @@ fn collect_pose_node_weights(
                 node_id,
                 "From",
                 from,
+                from,
                 effective_weight,
                 target,
                 weights,
@@ -416,6 +472,7 @@ fn collect_pose_node_weights(
                 graph,
                 node_id,
                 "To",
+                1.0 - from,
                 1.0 - from,
                 effective_weight,
                 target,
@@ -435,6 +492,7 @@ fn collect_weighted_pose_input(
     node: NodeId,
     input_name: &str,
     child_weight: f32,
+    child_effective_weight: f32,
     parent_effective_weight: f32,
     target: NodeId,
     weights: &mut Vec<PoseNodeWeight>,
@@ -451,7 +509,7 @@ fn collect_weighted_pose_input(
         output,
         target,
         child_weight,
-        parent_effective_weight * child_weight,
+        parent_effective_weight * child_effective_weight,
         weights,
         depth,
     );
@@ -460,6 +518,17 @@ fn collect_weighted_pose_input(
 fn graph_blend_weight(graph: &Graph<AnimNodeData, AnimDataType, AnimValue>, node: NodeId) -> f32 {
     resolve_graph_float_input(graph, node, "Weight", 0)
         .unwrap_or(0.5)
+        .clamp(0.0, 1.0)
+}
+
+fn graph_weight_input(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+    input_name: &str,
+    fallback: f32,
+) -> f32 {
+    resolve_graph_float_input(graph, node, input_name, 0)
+        .unwrap_or(fallback)
         .clamp(0.0, 1.0)
 }
 
@@ -571,6 +640,7 @@ fn graph_node_input_bool(
 pub enum AnimNodeTemplate {
     Clip,
     Blend,
+    WeightedBlend,
     State,
     Transition,
     FloatParameter,
@@ -592,7 +662,7 @@ impl NodeTemplateTrait for AnimNodeTemplate {
 
     fn node_finder_categories(&self, _user_state: &mut Self::UserState) -> Vec<Self::CategoryType> {
         vec![match self {
-            Self::Clip | Self::Blend => "Pose",
+            Self::Clip | Self::Blend | Self::WeightedBlend => "Pose",
             Self::State | Self::Transition => "State Machine",
             Self::FloatParameter | Self::BoolParameter => "Parameters",
             Self::Remap => "Math",
@@ -659,6 +729,41 @@ impl NodeTemplateTrait for AnimNodeTemplate {
                     "Weight".to_string(),
                     AnimDataType::Float,
                     AnimValue::Float(0.5),
+                    InputParamKind::ConnectionOrConstant,
+                    true,
+                );
+                graph.add_output_param(node_id, "Pose".to_string(), AnimDataType::Pose);
+            }
+            Self::WeightedBlend => {
+                graph.add_input_param(
+                    node_id,
+                    "A".to_string(),
+                    AnimDataType::Pose,
+                    AnimValue::None,
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "B".to_string(),
+                    AnimDataType::Pose,
+                    AnimValue::None,
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "A Weight".to_string(),
+                    AnimDataType::Float,
+                    AnimValue::Float(1.0),
+                    InputParamKind::ConnectionOrConstant,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "B Weight".to_string(),
+                    AnimDataType::Float,
+                    AnimValue::Float(1.0),
                     InputParamKind::ConnectionOrConstant,
                     true,
                 );
@@ -791,13 +896,17 @@ impl NodeTemplateTrait for AnimNodeTemplate {
 
 impl AnimNodeTemplate {
     fn produces_pose(self) -> bool {
-        matches!(self, Self::Clip | Self::Blend | Self::Transition)
+        matches!(
+            self,
+            Self::Clip | Self::Blend | Self::WeightedBlend | Self::Transition
+        )
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::Clip => "Animation Clip",
             Self::Blend => "Blend",
+            Self::WeightedBlend => "Weighted Blend",
             Self::State => "State",
             Self::Transition => "Transition",
             Self::FloatParameter => "Float Parameter",
@@ -811,6 +920,7 @@ impl AnimNodeTemplate {
         match self {
             Self::Clip => "Samples a Bevy animation clip.",
             Self::Blend => "Interpolates two poses by weight.",
+            Self::WeightedBlend => "Bevy-style blend with raw child weights.",
             Self::State => "Names a pose-producing state.",
             Self::Transition => "Chooses between poses with a condition.",
             Self::FloatParameter => "Reads a numeric graph parameter.",
@@ -831,6 +941,7 @@ impl NodeTemplateIter for AnimNodeTemplates {
         vec![
             AnimNodeTemplate::Clip,
             AnimNodeTemplate::Blend,
+            AnimNodeTemplate::WeightedBlend,
             AnimNodeTemplate::State,
             AnimNodeTemplate::Transition,
             AnimNodeTemplate::FloatParameter,

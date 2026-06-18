@@ -1,5 +1,8 @@
 use bevy::prelude::*;
-use bevy_anim_graph_editor::animation_graph::{AnimGraphEditor, AnimGraphResponse};
+use bevy_anim_graph_editor::{
+    animation_graph::{AnimGraphEditor, AnimGraphResponse},
+    runtime,
+};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use egui_graph_edit::NodeResponse;
 
@@ -41,6 +44,7 @@ fn editor_ui(
     mut editor: ResMut<AnimGraphEditor>,
     mut preview: Option<ResMut<PreviewState>>,
     gltfs: Res<Assets<bevy::gltf::Gltf>>,
+    graphs: Res<Assets<AnimationGraph>>,
     asset_server: Res<AssetServer>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -198,6 +202,30 @@ fn editor_ui(
                 ui.separator();
                 ui.label("Space toggles playback");
                 ui.label("Enter cycles animation");
+
+                ui.separator();
+                ui.heading("Native Bevy Tree");
+                if let Some(graph_handle) = preview.graph.as_ref() {
+                    if let Some(graph) = graphs.get(graph_handle) {
+                        let clip_names: Vec<_> = preview
+                            .animations
+                            .iter()
+                            .copied()
+                            .zip(preview.animation_names.iter().cloned())
+                            .collect();
+                        egui::ScrollArea::vertical()
+                            .max_height(220.0)
+                            .show(ui, |ui| {
+                                for line in runtime::native_tree_lines(graph, &clip_names) {
+                                    ui.monospace(line);
+                                }
+                            });
+                    } else {
+                        ui.label("Graph asset is loading");
+                    }
+                } else {
+                    ui.label("No Bevy graph asset");
+                }
             } else {
                 ui.label("Preview not initialized");
             }

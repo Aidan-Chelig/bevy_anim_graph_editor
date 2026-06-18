@@ -131,6 +131,8 @@ pub struct LiveNodeWeight {
 pub enum WeightDriver {
     BlendA(egui_graph_edit::NodeId),
     BlendB(egui_graph_edit::NodeId),
+    WeightedBlendA(egui_graph_edit::NodeId),
+    WeightedBlendB(egui_graph_edit::NodeId),
     TransitionFrom(egui_graph_edit::NodeId),
     TransitionTo(egui_graph_edit::NodeId),
 }
@@ -140,6 +142,8 @@ impl WeightDriver {
         match self {
             Self::BlendA(node) => 1.0 - blend_weight(editor, node),
             Self::BlendB(node) => blend_weight(editor, node),
+            Self::WeightedBlendA(node) => graph_weight_input(editor, node, "A Weight", 1.0),
+            Self::WeightedBlendB(node) => graph_weight_input(editor, node, "B Weight", 1.0),
             Self::TransitionFrom(node) => {
                 if resolve_bool_input(editor, node, "Condition").unwrap_or(false) {
                     0.0
@@ -344,6 +348,15 @@ pub fn clip_speed(editor: &AnimGraphEditor, clip_node: egui_graph_edit::NodeId) 
         .max(0.0)
 }
 
+pub fn native_tree_lines(
+    graph: &AnimationGraph,
+    clip_names: &[(AnimationNodeIndex, String)],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    append_native_tree_lines(graph, graph.root, clip_names, 0, &mut lines);
+    lines
+}
+
 pub fn preview_tree_signature(editor: &AnimGraphEditor) -> Option<String> {
     let output = preview_output_node(editor)?;
     let input = editor.graph.graph.nodes[output].get_input("Pose").ok()?;
@@ -351,6 +364,39 @@ pub fn preview_tree_signature(editor: &AnimGraphEditor) -> Option<String> {
     let mut signature = format!("output:{:?};", output);
     append_output_signature(editor, source, &mut signature);
     Some(signature)
+}
+
+fn append_native_tree_lines(
+    graph: &AnimationGraph,
+    node_index: AnimationNodeIndex,
+    clip_names: &[(AnimationNodeIndex, String)],
+    depth: usize,
+    lines: &mut Vec<String>,
+) {
+    let Some(node) = graph.get(node_index) else {
+        return;
+    };
+
+    let indent = "  ".repeat(depth);
+    let label = match &node.node_type {
+        AnimationNodeType::Clip(_) => clip_names
+            .iter()
+            .find_map(|(index, name)| (*index == node_index).then_some(name.as_str()))
+            .unwrap_or("Clip"),
+        AnimationNodeType::Blend => "Blend",
+        AnimationNodeType::Add => "Add",
+    };
+    lines.push(format!(
+        "{indent}{label} #{:?} weight {:.3}",
+        node_index.index(),
+        node.weight
+    ));
+
+    let mut children: Vec<_> = graph.graph.neighbors(node_index).collect();
+    children.sort_by_key(|child| child.index());
+    for child in children {
+        append_native_tree_lines(graph, child, clip_names, depth + 1, lines);
+    }
 }
 
 fn compile_source_node(
@@ -424,6 +470,42 @@ fn compile_source_node(
                 live_clips,
                 live_node_weights,
                 Some(WeightDriver::BlendB(node_id)),
+            )?;
+            Ok(blend)
+        }
+        AnimNodeTemplate::WeightedBlend => {
+            let blend = graph.add_blend(initial_weight, parent);
+            if let Some(driver) = weight_driver {
+                live_node_weights.push(LiveNodeWeight {
+                    animation: blend,
+                    driver,
+                });
+            }
+            compile_connected_input(
+                editor,
+                gltf,
+                node_id,
+                "A",
+                graph,
+                blend,
+                playable_nodes,
+                playable_names,
+                live_clips,
+                live_node_weights,
+                Some(WeightDriver::WeightedBlendA(node_id)),
+            )?;
+            compile_connected_input(
+                editor,
+                gltf,
+                node_id,
+                "B",
+                graph,
+                blend,
+                playable_nodes,
+                playable_names,
+                live_clips,
+                live_node_weights,
+                Some(WeightDriver::WeightedBlendB(node_id)),
             )?;
             Ok(blend)
         }
@@ -549,6 +631,10 @@ fn append_output_signature(
             append_connected_signature(editor, node_id, "A", signature);
             append_connected_signature(editor, node_id, "B", signature);
         }
+        AnimNodeTemplate::WeightedBlend => {
+            append_connected_signature(editor, node_id, "A", signature);
+            append_connected_signature(editor, node_id, "B", signature);
+        }
         AnimNodeTemplate::State => {
             append_connected_signature(editor, node_id, "Pose", signature);
         }
@@ -621,6 +707,17 @@ fn node_input_bool(
 fn blend_weight(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId) -> f32 {
     resolve_float_input(editor, node, "Weight")
         .unwrap_or(0.5)
+        .clamp(0.0, 1.0)
+}
+
+fn graph_weight_input(
+    editor: &AnimGraphEditor,
+    node: egui_graph_edit::NodeId,
+    input_name: &str,
+    fallback: f32,
+) -> f32 {
+    resolve_float_input(editor, node, input_name)
+        .unwrap_or(fallback)
         .clamp(0.0, 1.0)
 }
 
