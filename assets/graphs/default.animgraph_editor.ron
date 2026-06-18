@@ -151,6 +151,138 @@
                     )),
                     version: 1,
                 ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 6,
+                            version: 7,
+                        ),
+                        label: "Remap 0..1",
+                        inputs: [
+                            ("Value", (
+                                idx: 13,
+                                version: 5,
+                            )),
+                            ("In Min", (
+                                idx: 14,
+                                version: 7,
+                            )),
+                            ("In Max", (
+                                idx: 12,
+                                version: 3,
+                            )),
+                        ],
+                        outputs: [
+                            ("Value", (
+                                idx: 5,
+                                version: 5,
+                            )),
+                        ],
+                        user_data: (
+                            template: Remap,
+                            note: "Maps a float range to a normalized 0..1 value.",
+                        ),
+                    )),
+                    version: 7,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 7,
+                            version: 5,
+                        ),
+                        label: "Animation Clip",
+                        inputs: [
+                            ("Clip", (
+                                idx: 16,
+                                version: 5,
+                            )),
+                            ("Speed", (
+                                idx: 15,
+                                version: 3,
+                            )),
+                        ],
+                        outputs: [
+                            ("Pose", (
+                                idx: 6,
+                                version: 5,
+                            )),
+                        ],
+                        user_data: (
+                            template: Clip,
+                            note: "Samples a Bevy animation clip.",
+                        ),
+                    )),
+                    version: 5,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 8,
+                            version: 1,
+                        ),
+                        label: "Blend",
+                        inputs: [
+                            ("A", (
+                                idx: 17,
+                                version: 1,
+                            )),
+                            ("B", (
+                                idx: 18,
+                                version: 1,
+                            )),
+                            ("Weight", (
+                                idx: 19,
+                                version: 1,
+                            )),
+                        ],
+                        outputs: [
+                            ("Pose", (
+                                idx: 7,
+                                version: 1,
+                            )),
+                        ],
+                        user_data: (
+                            template: Blend,
+                            note: "Interpolates two poses by weight.",
+                        ),
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 9,
+                            version: 1,
+                        ),
+                        label: "Remap 0..1",
+                        inputs: [
+                            ("Value", (
+                                idx: 11,
+                                version: 3,
+                            )),
+                            ("In Min", (
+                                idx: 20,
+                                version: 1,
+                            )),
+                            ("In Max", (
+                                idx: 21,
+                                version: 1,
+                            )),
+                        ],
+                        outputs: [
+                            ("Value", (
+                                idx: 8,
+                                version: 1,
+                            )),
+                        ],
+                        user_data: (
+                            template: Remap,
+                            note: "Maps a float range to a normalized 0..1 value.",
+                        ),
+                    )),
+                    version: 1,
+                ),
             ],
             inputs: [
                 (
@@ -327,6 +459,193 @@
                     )),
                     version: 1,
                 ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 11,
+                            version: 3,
+                        ),
+                        typ: Float,
+                        value: Float(0.0),
+                        kind: ConnectionOrConstant,
+                        node: (
+                            idx: 9,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 3,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 12,
+                            version: 3,
+                        ),
+                        typ: Float,
+                        value: Float(0.5),
+                        kind: ConstantOnly,
+                        node: (
+                            idx: 6,
+                            version: 7,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 3,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 13,
+                            version: 5,
+                        ),
+                        typ: Float,
+                        value: Float(0.0),
+                        kind: ConnectionOrConstant,
+                        node: (
+                            idx: 6,
+                            version: 7,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 5,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 14,
+                            version: 7,
+                        ),
+                        typ: Float,
+                        value: Float(0.0),
+                        kind: ConstantOnly,
+                        node: (
+                            idx: 6,
+                            version: 7,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 7,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 15,
+                            version: 3,
+                        ),
+                        typ: Float,
+                        value: Float(1.0),
+                        kind: ConnectionOrConstant,
+                        node: (
+                            idx: 7,
+                            version: 5,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 3,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 16,
+                            version: 5,
+                        ),
+                        typ: Pose,
+                        value: Text("Jog"),
+                        kind: ConstantOnly,
+                        node: (
+                            idx: 7,
+                            version: 5,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 5,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 17,
+                            version: 1,
+                        ),
+                        typ: Pose,
+                        value: r#None,
+                        kind: ConnectionOnly,
+                        node: (
+                            idx: 8,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 18,
+                            version: 1,
+                        ),
+                        typ: Pose,
+                        value: r#None,
+                        kind: ConnectionOnly,
+                        node: (
+                            idx: 8,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 19,
+                            version: 1,
+                        ),
+                        typ: Float,
+                        value: Float(0.65),
+                        kind: ConnectionOrConstant,
+                        node: (
+                            idx: 8,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 20,
+                            version: 1,
+                        ),
+                        typ: Float,
+                        value: Float(0.5),
+                        kind: ConstantOnly,
+                        node: (
+                            idx: 9,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 21,
+                            version: 1,
+                        ),
+                        typ: Float,
+                        value: Float(1.0),
+                        kind: ConstantOnly,
+                        node: (
+                            idx: 9,
+                            version: 1,
+                        ),
+                        shown_inline: true,
+                    )),
+                    version: 1,
+                ),
             ],
             outputs: [
                 (
@@ -389,6 +708,62 @@
                     )),
                     version: 1,
                 ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 5,
+                            version: 5,
+                        ),
+                        node: (
+                            idx: 6,
+                            version: 7,
+                        ),
+                        typ: Float,
+                    )),
+                    version: 5,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 6,
+                            version: 5,
+                        ),
+                        node: (
+                            idx: 7,
+                            version: 5,
+                        ),
+                        typ: Pose,
+                    )),
+                    version: 5,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 7,
+                            version: 1,
+                        ),
+                        node: (
+                            idx: 8,
+                            version: 1,
+                        ),
+                        typ: Pose,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        id: (
+                            idx: 8,
+                            version: 1,
+                        ),
+                        node: (
+                            idx: 9,
+                            version: 1,
+                        ),
+                        typ: Float,
+                    )),
+                    version: 1,
+                ),
             ],
             connections: [
                 (
@@ -435,10 +810,47 @@
                 ),
                 (
                     value: Some((
-                        idx: 3,
+                        idx: 5,
+                        version: 5,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        idx: 7,
                         version: 1,
                     )),
                     version: 1,
+                ),
+                (
+                    value: Some((
+                        idx: 3,
+                        version: 1,
+                    )),
+                    version: 3,
+                ),
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: Some((
+                        idx: 3,
+                        version: 1,
+                    )),
+                    version: 5,
+                ),
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: None,
+                    version: 0,
+                ),
+                (
+                    value: None,
+                    version: 0,
                 ),
                 (
                     value: Some((
@@ -447,17 +859,23 @@
                     )),
                     version: 1,
                 ),
+                (
+                    value: Some((
+                        idx: 6,
+                        version: 5,
+                    )),
+                    version: 1,
+                ),
+                (
+                    value: Some((
+                        idx: 8,
+                        version: 1,
+                    )),
+                    version: 1,
+                ),
             ],
         ),
         node_order: [
-            (
-                idx: 4,
-                version: 1,
-            ),
-            (
-                idx: 5,
-                version: 1,
-            ),
             (
                 idx: 1,
                 version: 1,
@@ -467,7 +885,31 @@
                 version: 1,
             ),
             (
+                idx: 5,
+                version: 1,
+            ),
+            (
+                idx: 6,
+                version: 7,
+            ),
+            (
+                idx: 9,
+                version: 1,
+            ),
+            (
                 idx: 3,
+                version: 1,
+            ),
+            (
+                idx: 7,
+                version: 5,
+            ),
+            (
+                idx: 4,
+                version: 1,
+            ),
+            (
+                idx: 8,
                 version: 1,
             ),
         ],
@@ -481,36 +923,64 @@
             ),
             (
                 value: Some((
-                    x: 80.0,
-                    y: 100.0,
+                    x: 219.47061,
+                    y: 217.06796,
                 )),
                 version: 1,
             ),
             (
                 value: Some((
-                    x: 80.0,
-                    y: 320.0,
+                    x: 219.47061,
+                    y: 364.53854,
                 )),
                 version: 1,
             ),
             (
                 value: Some((
-                    x: 101.78125,
-                    y: 561.9883,
+                    x: 58.916016,
+                    y: 660.1364,
                 )),
                 version: 1,
             ),
             (
                 value: Some((
-                    x: 420.0,
-                    y: 220.0,
+                    x: 477.86313,
+                    y: 297.7676,
                 )),
                 version: 1,
             ),
             (
                 value: Some((
-                    x: 760.0,
-                    y: 300.0,
+                    x: 967.3622,
+                    y: 430.0949,
+                )),
+                version: 1,
+            ),
+            (
+                value: Some((
+                    x: 275.25824,
+                    y: 491.33658,
+                )),
+                version: 7,
+            ),
+            (
+                value: Some((
+                    x: 468.60437,
+                    y: 436.33026,
+                )),
+                version: 5,
+            ),
+            (
+                value: Some((
+                    x: 725.52325,
+                    y: 425.59845,
+                )),
+                version: 1,
+            ),
+            (
+                value: Some((
+                    x: 471.35,
+                    y: 591.8805,
                 )),
                 version: 1,
             ),
@@ -540,24 +1010,33 @@
                 value: Some(LeftToRight),
                 version: 1,
             ),
+            (
+                value: Some(LeftToRight),
+                version: 7,
+            ),
+            (
+                value: Some(LeftToRight),
+                version: 5,
+            ),
+            (
+                value: Some(LeftToRight),
+                version: 1,
+            ),
+            (
+                value: Some(LeftToRight),
+                version: 1,
+            ),
         ],
-        node_finder: Some((
-            query: "",
-            position: Some((
-                x: 912.4961,
-                y: 650.45703,
-            )),
-            just_spawned: false,
-            _phantom: (),
-        )),
+        node_finder: None,
         pan_zoom: (
             pan: (
-                x: -42.871094,
-                y: 4.8867188,
+                x: -32.382813,
+                y: -47.835938,
             ),
-            zoom: 1.0,
+            zoom: 0.67032003,
         ),
         _user_state: (),
     ),
     preview_output: None,
+    gltf_asset_path: Some("character.glb"),
 )

@@ -8,8 +8,6 @@ mod preview;
 use animation_graph::{AnimGraphEditor, AnimGraphResponse};
 use preview::PreviewState;
 
-const DEFAULT_GRAPH_PATH: &str = "assets/graphs/default.animgraph_editor.ron";
-
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -26,6 +24,7 @@ fn main() {
             Update,
             (
                 preview::build_preview_animation_graph,
+                preview::reload_preview_scene,
                 preview::update_preview_diagnostics,
                 preview::attach_preview_animation_graph,
                 preview::apply_editor_graph_to_preview,
@@ -43,6 +42,7 @@ fn editor_ui(
     mut editor: ResMut<AnimGraphEditor>,
     mut preview: Option<ResMut<PreviewState>>,
     gltfs: Res<Assets<bevy::gltf::Gltf>>,
+    asset_server: Res<AssetServer>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     ctx.set_visuals(egui::Visuals::dark());
@@ -68,20 +68,78 @@ fn editor_ui(
             }
             ui.separator();
             if ui.button("Save").clicked() {
-                match editor.save_to_path(DEFAULT_GRAPH_PATH) {
-                    Ok(()) => editor.last_event = format!("Saved {DEFAULT_GRAPH_PATH}"),
-                    Err(error) => editor.last_event = format!("Save failed: {error}"),
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Save Animation Graph Project")
+                    .add_filter("Animation graph project", &["ron"])
+                    .set_file_name("default.animgraph_project.ron")
+                    .save_file()
+                {
+                    let gltf_asset_path = preview
+                        .as_deref()
+                        .map(|preview| preview.asset_path.as_str());
+                    match editor.save_to_path(&path, gltf_asset_path) {
+                        Ok(()) => editor.last_event = format!("Saved {}", path.display()),
+                        Err(error) => editor.last_event = format!("Save failed: {error}"),
+                    }
                 }
             }
             if ui.button("Load").clicked() {
-                match editor.load_from_path(DEFAULT_GRAPH_PATH) {
-                    Ok(()) => {
-                        if let Some(preview) = preview.as_deref_mut() {
-                            preview.last_applied_signature = None;
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Load Animation Graph Project")
+                    .add_filter("Animation graph project", &["ron"])
+                    .pick_file()
+                {
+                    match editor.load_from_path(&path) {
+                        Ok(gltf_asset_path) => {
+                            let mut load_message = format!("Loaded {}", path.display());
+                            if let Some(preview) = preview.as_deref_mut() {
+                                preview.last_applied_signature = None;
+                                if let Some(gltf_asset_path) = gltf_asset_path {
+                                    if preview::asset_path_exists(&gltf_asset_path) {
+                                        preview.load_asset_path(gltf_asset_path, &asset_server);
+                                    } else if let Some(relinked_path) = rfd::FileDialog::new()
+                                        .set_title("Relink Missing GLB")
+                                        .add_filter("glTF", &["glb", "gltf"])
+                                        .pick_file()
+                                    {
+                                        match preview.import_gltf(&relinked_path, &asset_server) {
+                                            Ok(()) => {
+                                                load_message = format!(
+                                                    "Loaded {} and relinked {}",
+                                                    path.display(),
+                                                    relinked_path.display()
+                                                );
+                                            }
+                                            Err(error) => {
+                                                load_message = format!("Relink failed: {error}");
+                                            }
+                                        }
+                                    } else {
+                                        preview.status =
+                                            format!("Missing GLB: assets/{gltf_asset_path}");
+                                    }
+                                }
+                            }
+                            editor.last_event = load_message;
                         }
-                        editor.last_event = format!("Loaded {DEFAULT_GRAPH_PATH}");
+                        Err(error) => editor.last_event = format!("Load failed: {error}"),
                     }
-                    Err(error) => editor.last_event = format!("Load failed: {error}"),
+                }
+            }
+            if ui.button("Import GLB").clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Import GLB")
+                    .add_filter("glTF", &["glb", "gltf"])
+                    .pick_file()
+                {
+                    if let Some(preview) = preview.as_deref_mut() {
+                        match preview.import_gltf(&path, &asset_server) {
+                            Ok(()) => editor.last_event = format!("Imported {}", path.display()),
+                            Err(error) => editor.last_event = format!("Import failed: {error}"),
+                        }
+                    } else {
+                        editor.last_event = "Preview not initialized".to_string();
+                    }
                 }
             }
             ui.separator();

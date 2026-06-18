@@ -24,6 +24,8 @@ pub struct AnimGraphEditor {
 pub struct SavedAnimGraph {
     pub graph: EditorState,
     pub preview_output: Option<NodeId>,
+    #[serde(default)]
+    pub gltf_asset_path: Option<String>,
 }
 
 impl Default for AnimGraphEditor {
@@ -73,10 +75,15 @@ impl AnimGraphEditor {
         }
     }
 
-    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SaveGraphError> {
+    pub fn save_to_path(
+        &self,
+        path: impl AsRef<Path>,
+        gltf_asset_path: Option<&str>,
+    ) -> Result<(), SaveGraphError> {
         let saved = SavedAnimGraph {
             graph: self.graph.clone(),
             preview_output: self.preview_output,
+            gltf_asset_path: gltf_asset_path.map(str::to_string),
         };
         let ron = ron::ser::to_string_pretty(&saved, ron::ser::PrettyConfig::default())?;
         let path = path.as_ref();
@@ -87,14 +94,17 @@ impl AnimGraphEditor {
         Ok(())
     }
 
-    pub fn load_from_path(&mut self, path: impl AsRef<Path>) -> Result<(), LoadGraphError> {
+    pub fn load_from_path(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<Option<String>, LoadGraphError> {
         let ron = fs::read_to_string(path)?;
         let saved: SavedAnimGraph = ron::from_str(&ron)?;
         self.graph = saved.graph;
         self.preview_output = saved.preview_output;
         self.clamp_float_values();
         self.last_event = "Graph loaded".to_string();
-        Ok(())
+        Ok(saved.gltf_asset_path)
     }
 
     pub fn clamp_float_values(&mut self) {
@@ -226,7 +236,7 @@ impl NodeDataTrait for AnimNodeData {
         &self,
         ui: &mut egui::Ui,
         node_id: NodeId,
-        _graph: &Graph<Self, Self::DataType, Self::ValueType>,
+        graph: &Graph<Self, Self::DataType, Self::ValueType>,
         _user_state: &mut Self::UserState,
     ) -> Vec<NodeResponse<Self::Response, Self>>
     where
@@ -235,6 +245,41 @@ impl NodeDataTrait for AnimNodeData {
         let mut responses = Vec::new();
         ui.separator();
         ui.label(&self.note);
+
+        if matches!(self.template, AnimNodeTemplate::Remap) {
+            let output = resolve_graph_float_input(graph, node_id, "Value", 0)
+                .and_then(|value| remap_node_value(graph, node_id, value));
+            let text = output
+                .map(|value| format!("Output: {value:.3}"))
+                .unwrap_or_else(|| "Output: unavailable".to_string());
+            ui.monospace(text);
+        }
+
+        if self.template.produces_pose() {
+            let weights = pose_node_weights(graph, node_id);
+            if weights.is_empty() {
+                ui.monospace("Weight: unreachable");
+            } else {
+                for weight in weights {
+                    ui.monospace(format!(
+                        "Weight: {:.3}  Effective: {:.3}",
+                        weight.node_weight, weight.effective_weight
+                    ));
+                }
+            }
+        }
+
+        if matches!(self.template, AnimNodeTemplate::Blend) {
+            let weight = graph_blend_weight(graph, node_id);
+            ui.monospace(format!("A: {:.3}  B: {:.3}", 1.0 - weight, weight));
+        }
+
+        if matches!(self.template, AnimNodeTemplate::Transition) {
+            let condition =
+                resolve_graph_bool_input(graph, node_id, "Condition", 0).unwrap_or(false);
+            let from = if condition { 0.0 } else { 1.0 };
+            ui.monospace(format!("From: {:.3}  To: {:.3}", from, 1.0 - from));
+        }
 
         if matches!(self.template, AnimNodeTemplate::Output)
             && ui.button("Use as preview output").clicked()
@@ -260,8 +305,265 @@ impl NodeDataTrait for AnimNodeData {
             AnimNodeTemplate::FloatParameter | AnimNodeTemplate::BoolParameter => {
                 Color32::from_rgb(87, 105, 122)
             }
+            AnimNodeTemplate::Remap => Color32::from_rgb(102, 118, 73),
             AnimNodeTemplate::Output => Color32::from_rgb(140, 68, 84),
         })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PoseNodeWeight {
+    node_weight: f32,
+    effective_weight: f32,
+}
+
+fn pose_node_weights(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    target: NodeId,
+) -> Vec<PoseNodeWeight> {
+    let mut weights = Vec::new();
+    for (output_node, _) in graph
+        .nodes
+        .iter()
+        .filter(|(_, node)| matches!(node.user_data.template, AnimNodeTemplate::Output))
+    {
+        let Ok(input) = graph.nodes[output_node].get_input("Pose") else {
+            continue;
+        };
+        let Some(output) = graph.connection(input) else {
+            continue;
+        };
+
+        collect_pose_node_weights(graph, output, target, 1.0, 1.0, &mut weights, 0);
+    }
+    weights
+}
+
+fn collect_pose_node_weights(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    output: egui_graph_edit::OutputId,
+    target: NodeId,
+    node_weight: f32,
+    effective_weight: f32,
+    weights: &mut Vec<PoseNodeWeight>,
+    depth: usize,
+) {
+    if depth > 64 {
+        return;
+    }
+
+    let node_id = graph.get_output(output).node;
+    let node = &graph.nodes[node_id];
+    if node_id == target {
+        weights.push(PoseNodeWeight {
+            node_weight,
+            effective_weight,
+        });
+    }
+
+    match node.user_data.template {
+        AnimNodeTemplate::Clip => {}
+        AnimNodeTemplate::Blend => {
+            let blend_weight = graph_blend_weight(graph, node_id);
+            collect_weighted_pose_input(
+                graph,
+                node_id,
+                "A",
+                1.0 - blend_weight,
+                effective_weight,
+                target,
+                weights,
+                depth + 1,
+            );
+            collect_weighted_pose_input(
+                graph,
+                node_id,
+                "B",
+                blend_weight,
+                effective_weight,
+                target,
+                weights,
+                depth + 1,
+            );
+        }
+        AnimNodeTemplate::State => {
+            collect_weighted_pose_input(
+                graph,
+                node_id,
+                "Pose",
+                node_weight,
+                effective_weight,
+                target,
+                weights,
+                depth + 1,
+            );
+        }
+        AnimNodeTemplate::Transition => {
+            let condition =
+                resolve_graph_bool_input(graph, node_id, "Condition", 0).unwrap_or(false);
+            let from = if condition { 0.0 } else { 1.0 };
+            collect_weighted_pose_input(
+                graph,
+                node_id,
+                "From",
+                from,
+                effective_weight,
+                target,
+                weights,
+                depth + 1,
+            );
+            collect_weighted_pose_input(
+                graph,
+                node_id,
+                "To",
+                1.0 - from,
+                effective_weight,
+                target,
+                weights,
+                depth + 1,
+            );
+        }
+        AnimNodeTemplate::FloatParameter
+        | AnimNodeTemplate::BoolParameter
+        | AnimNodeTemplate::Remap
+        | AnimNodeTemplate::Output => {}
+    }
+}
+
+fn collect_weighted_pose_input(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+    input_name: &str,
+    child_weight: f32,
+    parent_effective_weight: f32,
+    target: NodeId,
+    weights: &mut Vec<PoseNodeWeight>,
+    depth: usize,
+) {
+    let Ok(input) = graph.nodes[node].get_input(input_name) else {
+        return;
+    };
+    let Some(output) = graph.connection(input) else {
+        return;
+    };
+    collect_pose_node_weights(
+        graph,
+        output,
+        target,
+        child_weight,
+        parent_effective_weight * child_weight,
+        weights,
+        depth,
+    );
+}
+
+fn graph_blend_weight(graph: &Graph<AnimNodeData, AnimDataType, AnimValue>, node: NodeId) -> f32 {
+    resolve_graph_float_input(graph, node, "Weight", 0)
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0)
+}
+
+fn remap_node_value(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+    value: f32,
+) -> Option<f32> {
+    let in_min = graph_node_input_float(graph, node, "In Min").unwrap_or(0.0);
+    let in_max = graph_node_input_float(graph, node, "In Max").unwrap_or(1.0);
+    let range = in_max - in_min;
+
+    if range.abs() <= f32::EPSILON {
+        Some(if value >= in_max { 1.0 } else { 0.0 })
+    } else {
+        Some(((value - in_min) / range).clamp(0.0, 1.0))
+    }
+}
+
+fn resolve_graph_float_input(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+    input_name: &str,
+    depth: usize,
+) -> Option<f32> {
+    let input = graph.nodes[node].get_input(input_name).ok()?;
+    if let Some(output) = graph.connection(input) {
+        return resolve_graph_float_output(graph, output, depth + 1);
+    }
+
+    graph_node_input_float(graph, node, input_name)
+}
+
+fn resolve_graph_float_output(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    output: egui_graph_edit::OutputId,
+    depth: usize,
+) -> Option<f32> {
+    if depth > 32 {
+        return None;
+    }
+
+    let node = graph.get_output(output).node;
+    match graph.nodes[node].user_data.template {
+        AnimNodeTemplate::FloatParameter => graph_node_input_float(graph, node, "Value"),
+        AnimNodeTemplate::Remap => {
+            let value = resolve_graph_float_input(graph, node, "Value", depth + 1)?;
+            remap_node_value(graph, node, value)
+        }
+        _ => None,
+    }
+}
+
+fn resolve_graph_bool_input(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+    input_name: &str,
+    depth: usize,
+) -> Option<bool> {
+    let input = graph.nodes[node].get_input(input_name).ok()?;
+    if let Some(output) = graph.connection(input) {
+        return resolve_graph_bool_output(graph, output, depth + 1);
+    }
+
+    graph_node_input_bool(graph, node, input_name)
+}
+
+fn resolve_graph_bool_output(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    output: egui_graph_edit::OutputId,
+    depth: usize,
+) -> Option<bool> {
+    if depth > 32 {
+        return None;
+    }
+
+    let node = graph.get_output(output).node;
+    match graph.nodes[node].user_data.template {
+        AnimNodeTemplate::BoolParameter => graph_node_input_bool(graph, node, "Value"),
+        _ => None,
+    }
+}
+
+fn graph_node_input_float(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+    input_name: &str,
+) -> Option<f32> {
+    let input = graph.nodes[node].get_input(input_name).ok()?;
+    match graph.get_input(input).value() {
+        AnimValue::Float(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn graph_node_input_bool(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+    input_name: &str,
+) -> Option<bool> {
+    let input = graph.nodes[node].get_input(input_name).ok()?;
+    match graph.get_input(input).value() {
+        AnimValue::Bool(value) => Some(*value),
+        _ => None,
     }
 }
 
@@ -273,6 +575,7 @@ pub enum AnimNodeTemplate {
     Transition,
     FloatParameter,
     BoolParameter,
+    Remap,
     Output,
 }
 
@@ -292,6 +595,7 @@ impl NodeTemplateTrait for AnimNodeTemplate {
             Self::Clip | Self::Blend => "Pose",
             Self::State | Self::Transition => "State Machine",
             Self::FloatParameter | Self::BoolParameter => "Parameters",
+            Self::Remap => "Math",
             Self::Output => "Output",
         }]
     }
@@ -444,6 +748,33 @@ impl NodeTemplateTrait for AnimNodeTemplate {
                 );
                 graph.add_output_param(node_id, "Value".to_string(), AnimDataType::Bool);
             }
+            Self::Remap => {
+                graph.add_input_param(
+                    node_id,
+                    "Value".to_string(),
+                    AnimDataType::Float,
+                    AnimValue::Float(0.0),
+                    InputParamKind::ConnectionOrConstant,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "In Min".to_string(),
+                    AnimDataType::Float,
+                    AnimValue::Float(0.0),
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "In Max".to_string(),
+                    AnimDataType::Float,
+                    AnimValue::Float(1.0),
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_output_param(node_id, "Value".to_string(), AnimDataType::Float);
+            }
             Self::Output => {
                 graph.add_input_param(
                     node_id,
@@ -459,6 +790,10 @@ impl NodeTemplateTrait for AnimNodeTemplate {
 }
 
 impl AnimNodeTemplate {
+    fn produces_pose(self) -> bool {
+        matches!(self, Self::Clip | Self::Blend | Self::Transition)
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Clip => "Animation Clip",
@@ -467,6 +802,7 @@ impl AnimNodeTemplate {
             Self::Transition => "Transition",
             Self::FloatParameter => "Float Parameter",
             Self::BoolParameter => "Bool Parameter",
+            Self::Remap => "Remap 0..1",
             Self::Output => "Output",
         }
     }
@@ -479,6 +815,7 @@ impl AnimNodeTemplate {
             Self::Transition => "Chooses between poses with a condition.",
             Self::FloatParameter => "Reads a numeric graph parameter.",
             Self::BoolParameter => "Reads a boolean graph parameter.",
+            Self::Remap => "Maps a float range to a normalized 0..1 value.",
             Self::Output => "Final pose used by the preview.",
         }
     }
@@ -498,6 +835,7 @@ impl NodeTemplateIter for AnimNodeTemplates {
             AnimNodeTemplate::Transition,
             AnimNodeTemplate::FloatParameter,
             AnimNodeTemplate::BoolParameter,
+            AnimNodeTemplate::Remap,
             AnimNodeTemplate::Output,
         ]
     }

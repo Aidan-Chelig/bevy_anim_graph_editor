@@ -30,6 +30,7 @@
 
         runtimeLibs = with pkgs; [
           alsa-lib
+          dbus
           libxkbcommon
           udev
           vulkan-loader
@@ -57,6 +58,7 @@
             pkg-config
 
             alsa-lib
+            dbus
             jack2
             libjack2
             libxkbcommon
@@ -71,6 +73,7 @@
             xorg.libXcursor
             xorg.libXi
             xorg.libXrandr
+            zenity
           ];
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;

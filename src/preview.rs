@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fs, io, path::Path, time::Duration};
 
 use bevy::{
     gltf::{Gltf, GltfAssetLabel},
@@ -8,39 +8,72 @@ use bevy::{
 use crate::animation_graph::{AnimGraphEditor, AnimNodeTemplate, AnimValue};
 
 const PREVIEW_ASSET: &str = "character.glb";
+const IMPORT_DIR: &str = "assets/imports";
 
 #[derive(Resource)]
 pub struct PreviewState {
+    pub asset_path: String,
     pub gltf: Handle<Gltf>,
     pub graph: Option<Handle<AnimationGraph>>,
     pub animations: Vec<AnimationNodeIndex>,
     pub animation_names: Vec<String>,
     pub active_animation: usize,
     pub live_clips: Vec<LiveClipNode>,
+    pub live_node_weights: Vec<LiveNodeWeight>,
     pub scene_count: usize,
     pub player_count: usize,
     pub apply_requested: bool,
     pub auto_apply: bool,
     pub last_applied_signature: Option<String>,
     pub status: String,
+    pub reload_scene: bool,
 }
 
 impl PreviewState {
-    fn new(gltf: Handle<Gltf>) -> Self {
+    fn new(asset_path: String, gltf: Handle<Gltf>) -> Self {
         Self {
+            asset_path,
             gltf,
             graph: None,
             animations: Vec::new(),
             animation_names: Vec::new(),
             active_animation: 0,
             live_clips: Vec::new(),
+            live_node_weights: Vec::new(),
             scene_count: 0,
             player_count: 0,
             apply_requested: false,
             auto_apply: true,
             last_applied_signature: None,
             status: "Loading character.glb".to_string(),
+            reload_scene: false,
         }
+    }
+
+    pub fn import_gltf(
+        &mut self,
+        source: impl AsRef<Path>,
+        asset_server: &AssetServer,
+    ) -> Result<(), ImportGltfError> {
+        let imported_asset = import_gltf_asset(source)?;
+        self.load_asset_path(imported_asset, asset_server);
+        Ok(())
+    }
+
+    pub fn load_asset_path(&mut self, asset_path: String, asset_server: &AssetServer) {
+        self.asset_path = asset_path.clone();
+        self.gltf = asset_server.load(asset_path.clone());
+        self.graph = None;
+        self.animations.clear();
+        self.animation_names.clear();
+        self.live_clips.clear();
+        self.live_node_weights.clear();
+        self.active_animation = 0;
+        self.scene_count = 0;
+        self.player_count = 0;
+        self.last_applied_signature = None;
+        self.status = format!("Loading {asset_path}");
+        self.reload_scene = true;
     }
 }
 
@@ -50,8 +83,48 @@ pub struct LiveClipNode {
     pub animation: AnimationNodeIndex,
 }
 
+#[derive(Clone, Copy)]
+pub struct LiveNodeWeight {
+    pub animation: AnimationNodeIndex,
+    pub driver: WeightDriver,
+}
+
+#[derive(Clone, Copy)]
+pub enum WeightDriver {
+    BlendA(egui_graph_edit::NodeId),
+    BlendB(egui_graph_edit::NodeId),
+    TransitionFrom(egui_graph_edit::NodeId),
+    TransitionTo(egui_graph_edit::NodeId),
+}
+
+impl WeightDriver {
+    fn resolve(self, editor: &AnimGraphEditor) -> f32 {
+        match self {
+            Self::BlendA(node) => 1.0 - blend_weight(editor, node),
+            Self::BlendB(node) => blend_weight(editor, node),
+            Self::TransitionFrom(node) => {
+                if resolve_bool_input(editor, node, "Condition").unwrap_or(false) {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            Self::TransitionTo(node) => {
+                if resolve_bool_input(editor, node, "Condition").unwrap_or(false) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
 #[derive(Component)]
 struct PreviewCamera;
+
+#[derive(Component)]
+pub struct PreviewSceneRoot;
 
 pub fn setup_preview_scene(
     mut commands: Commands,
@@ -60,7 +133,7 @@ pub fn setup_preview_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let gltf = asset_server.load(PREVIEW_ASSET);
-    commands.insert_resource(PreviewState::new(gltf));
+    commands.insert_resource(PreviewState::new(PREVIEW_ASSET.to_string(), gltf));
 
     commands.spawn((
         Camera3d::default(),
@@ -98,6 +171,34 @@ pub fn setup_preview_scene(
     commands.spawn((
         SceneRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(PREVIEW_ASSET))),
         Transform::from_scale(Vec3::splat(1.0)),
+        PreviewSceneRoot,
+    ));
+}
+
+pub fn reload_preview_scene(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    state: Option<ResMut<PreviewState>>,
+    scene_roots: Query<Entity, With<PreviewSceneRoot>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+
+    if !state.reload_scene {
+        return;
+    }
+    state.reload_scene = false;
+
+    for entity in &scene_roots {
+        commands.entity(entity).despawn();
+    }
+
+    let asset_path = state.asset_path.clone();
+    commands.spawn((
+        SceneRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(asset_path))),
+        Transform::from_scale(Vec3::splat(1.0)),
+        PreviewSceneRoot,
     ));
 }
 
@@ -127,6 +228,7 @@ pub fn build_preview_animation_graph(
     state.animations = animations;
     state.animation_names = animation_names(gltf);
     state.live_clips.clear();
+    state.live_node_weights.clear();
     state.active_animation = 0;
     state.status = format!("Loaded {} animation(s)", state.animations.len());
 }
@@ -237,6 +339,7 @@ pub fn apply_editor_graph_to_preview(
             state.animations = compiled.playable_nodes;
             state.animation_names = compiled.playable_names;
             state.live_clips = compiled.live_clips;
+            state.live_node_weights = compiled.live_node_weights;
             state.active_animation = 0;
             state.last_applied_signature = signature;
             state.status = format!("Applied editor graph: {}", compiled.summary);
@@ -263,17 +366,26 @@ pub fn apply_editor_graph_to_preview(
 pub fn sync_editor_graph_to_preview(
     editor: Res<AnimGraphEditor>,
     state: Option<Res<PreviewState>>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
     mut players: Query<&mut AnimationPlayer>,
 ) {
     let Some(state) = state else {
         return;
     };
 
-    if state.live_clips.is_empty() {
+    if state.live_clips.is_empty() && state.live_node_weights.is_empty() {
         return;
     }
 
-    let weights = evaluate_preview_output(&editor);
+    if let Some(graph_handle) = state.graph.as_ref()
+        && let Some(graph) = graphs.get_mut(graph_handle)
+    {
+        for live_weight in &state.live_node_weights {
+            if let Some(node) = graph.get_mut(live_weight.animation) {
+                node.weight = live_weight.driver.resolve(&editor).clamp(0.0, 1.0);
+            }
+        }
+    }
 
     for mut player in &mut players {
         for live_clip in &state.live_clips {
@@ -285,12 +397,8 @@ pub fn sync_editor_graph_to_preview(
                 continue;
             };
 
-            let weight = weights
-                .iter()
-                .find_map(|clip| (clip.editor_node == live_clip.editor_node).then_some(clip.weight))
-                .unwrap_or(0.0);
             let speed = node_input_float(&editor, live_clip.editor_node, "Speed").unwrap_or(1.0);
-            active_animation.set_weight(weight.clamp(0.0, 1.0));
+            active_animation.set_weight(1.0);
             active_animation.set_speed(speed.max(0.0));
         }
     }
@@ -326,6 +434,10 @@ pub fn loaded_gltf<'a>(state: &PreviewState, gltfs: &'a Assets<Gltf>) -> Option<
     gltfs.get(&state.gltf)
 }
 
+pub fn asset_path_exists(asset_path: &str) -> bool {
+    Path::new("assets").join(asset_path).exists()
+}
+
 pub fn toggle_preview_playback(
     input: Res<ButtonInput<KeyCode>>,
     mut players: Query<&mut AnimationPlayer>,
@@ -356,18 +468,23 @@ pub struct GraphValidation {
     pub message: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ImportGltfError {
+    #[error("selected file has no filename")]
+    MissingFileName,
+    #[error("selected file must be a .glb or .gltf")]
+    UnsupportedExtension,
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
 struct CompiledEditorGraph {
     graph: AnimationGraph,
     playable_nodes: Vec<AnimationNodeIndex>,
     playable_names: Vec<String>,
     live_clips: Vec<LiveClipNode>,
+    live_node_weights: Vec<LiveNodeWeight>,
     summary: String,
-}
-
-#[derive(Clone, Copy)]
-struct EvaluatedClip {
-    editor_node: egui_graph_edit::NodeId,
-    weight: f32,
 }
 
 fn compile_editor_graph(
@@ -389,6 +506,7 @@ fn compile_editor_graph(
     let mut playable_nodes = Vec::new();
     let mut playable_names = Vec::new();
     let mut live_clips = Vec::new();
+    let mut live_node_weights = Vec::new();
     let root = graph.root;
     compile_source_node(
         editor,
@@ -396,10 +514,11 @@ fn compile_editor_graph(
         source,
         &mut graph,
         root,
-        1.0,
         &mut playable_nodes,
         &mut playable_names,
         &mut live_clips,
+        &mut live_node_weights,
+        None,
     )?;
 
     let summary = if playable_names.is_empty() {
@@ -413,6 +532,7 @@ fn compile_editor_graph(
         playable_nodes,
         playable_names,
         live_clips,
+        live_node_weights,
         summary,
     })
 }
@@ -423,20 +543,30 @@ fn compile_source_node(
     output: egui_graph_edit::OutputId,
     graph: &mut AnimationGraph,
     parent: AnimationNodeIndex,
-    weight: f32,
     playable_nodes: &mut Vec<AnimationNodeIndex>,
     playable_names: &mut Vec<String>,
     live_clips: &mut Vec<LiveClipNode>,
+    live_node_weights: &mut Vec<LiveNodeWeight>,
+    weight_driver: Option<WeightDriver>,
 ) -> Result<AnimationNodeIndex, String> {
     let node_id = editor.graph.graph.get_output(output).node;
     let node = &editor.graph.graph.nodes[node_id];
+    let initial_weight = weight_driver
+        .map(|driver| driver.resolve(editor))
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
 
     match node.user_data.template {
         AnimNodeTemplate::Clip => {
             let clip_label = node_input_text(editor, node_id, "Clip").unwrap_or_default();
             let (clip, clip_name) = resolve_clip(gltf, &clip_label)?;
-            // Keep Bevy graph weights neutral; live editor values drive ActiveAnimation weights.
-            let node = graph.add_clip(clip, 1.0, parent);
+            let node = graph.add_clip(clip, initial_weight, parent);
+            if let Some(driver) = weight_driver {
+                live_node_weights.push(LiveNodeWeight {
+                    animation: node,
+                    driver,
+                });
+            }
             playable_nodes.push(node);
             playable_names.push(clip_name);
             live_clips.push(LiveClipNode {
@@ -446,11 +576,13 @@ fn compile_source_node(
             Ok(node)
         }
         AnimNodeTemplate::Blend => {
-            // Keep Bevy graph weights neutral; live editor values drive ActiveAnimation weights.
-            let blend = graph.add_blend(1.0, parent);
-            let blend_weight = resolve_float_input(editor, node_id, "Weight")
-                .unwrap_or(0.5)
-                .clamp(0.0, 1.0);
+            let blend = graph.add_blend(initial_weight, parent);
+            if let Some(driver) = weight_driver {
+                live_node_weights.push(LiveNodeWeight {
+                    animation: blend,
+                    driver,
+                });
+            }
             compile_connected_input(
                 editor,
                 gltf,
@@ -458,10 +590,11 @@ fn compile_source_node(
                 "A",
                 graph,
                 blend,
-                1.0 - blend_weight,
                 playable_nodes,
                 playable_names,
                 live_clips,
+                live_node_weights,
+                Some(WeightDriver::BlendA(node_id)),
             )?;
             compile_connected_input(
                 editor,
@@ -470,10 +603,11 @@ fn compile_source_node(
                 "B",
                 graph,
                 blend,
-                blend_weight,
                 playable_nodes,
                 playable_names,
                 live_clips,
+                live_node_weights,
+                Some(WeightDriver::BlendB(node_id)),
             )?;
             Ok(blend)
         }
@@ -484,23 +618,32 @@ fn compile_source_node(
             "Pose",
             graph,
             parent,
-            weight,
             playable_nodes,
             playable_names,
             live_clips,
+            live_node_weights,
+            weight_driver,
         ),
         AnimNodeTemplate::Transition => {
+            let transition = graph.add_blend(initial_weight, parent);
+            if let Some(driver) = weight_driver {
+                live_node_weights.push(LiveNodeWeight {
+                    animation: transition,
+                    driver,
+                });
+            }
             compile_connected_input(
                 editor,
                 gltf,
                 node_id,
                 "From",
                 graph,
-                parent,
-                weight,
+                transition,
                 playable_nodes,
                 playable_names,
                 live_clips,
+                live_node_weights,
+                Some(WeightDriver::TransitionFrom(node_id)),
             )?;
             compile_connected_input(
                 editor,
@@ -508,15 +651,18 @@ fn compile_source_node(
                 node_id,
                 "To",
                 graph,
-                parent,
-                weight,
+                transition,
                 playable_nodes,
                 playable_names,
                 live_clips,
-            )
+                live_node_weights,
+                Some(WeightDriver::TransitionTo(node_id)),
+            )?;
+            Ok(transition)
         }
         AnimNodeTemplate::FloatParameter
         | AnimNodeTemplate::BoolParameter
+        | AnimNodeTemplate::Remap
         | AnimNodeTemplate::Output => Err(format!("{} does not produce a pose", node.label)),
     }
 }
@@ -528,10 +674,11 @@ fn compile_connected_input(
     input_name: &str,
     graph: &mut AnimationGraph,
     parent: AnimationNodeIndex,
-    weight: f32,
     playable_nodes: &mut Vec<AnimationNodeIndex>,
     playable_names: &mut Vec<String>,
     live_clips: &mut Vec<LiveClipNode>,
+    live_node_weights: &mut Vec<LiveNodeWeight>,
+    weight_driver: Option<WeightDriver>,
 ) -> Result<AnimationNodeIndex, String> {
     let input = editor.graph.graph.nodes[node]
         .get_input(input_name)
@@ -547,80 +694,12 @@ fn compile_connected_input(
         output,
         graph,
         parent,
-        weight,
         playable_nodes,
         playable_names,
         live_clips,
+        live_node_weights,
+        weight_driver,
     )
-}
-
-fn evaluate_preview_output(editor: &AnimGraphEditor) -> Vec<EvaluatedClip> {
-    let Some(output) = preview_output_node(editor) else {
-        return Vec::new();
-    };
-
-    let Ok(input) = editor.graph.graph.nodes[output].get_input("Pose") else {
-        return Vec::new();
-    };
-
-    let Some(source) = editor.graph.graph.connection(input) else {
-        return Vec::new();
-    };
-
-    let mut clips = Vec::new();
-    evaluate_source_node(editor, source, 1.0, &mut clips);
-    clips
-}
-
-fn evaluate_source_node(
-    editor: &AnimGraphEditor,
-    output: egui_graph_edit::OutputId,
-    weight: f32,
-    clips: &mut Vec<EvaluatedClip>,
-) {
-    let node_id = editor.graph.graph.get_output(output).node;
-    let node = &editor.graph.graph.nodes[node_id];
-
-    match node.user_data.template {
-        AnimNodeTemplate::Clip => clips.push(EvaluatedClip {
-            editor_node: node_id,
-            weight,
-        }),
-        AnimNodeTemplate::Blend => {
-            let blend_weight = resolve_float_input(editor, node_id, "Weight")
-                .unwrap_or(0.5)
-                .clamp(0.0, 1.0);
-            evaluate_connected_input(editor, node_id, "A", weight * (1.0 - blend_weight), clips);
-            evaluate_connected_input(editor, node_id, "B", weight * blend_weight, clips);
-        }
-        AnimNodeTemplate::State => {
-            evaluate_connected_input(editor, node_id, "Pose", weight, clips);
-        }
-        AnimNodeTemplate::Transition => {
-            let condition = resolve_bool_input(editor, node_id, "Condition").unwrap_or(false);
-            let input = if condition { "To" } else { "From" };
-            evaluate_connected_input(editor, node_id, input, weight, clips);
-        }
-        AnimNodeTemplate::FloatParameter
-        | AnimNodeTemplate::BoolParameter
-        | AnimNodeTemplate::Output => {}
-    }
-}
-
-fn evaluate_connected_input(
-    editor: &AnimGraphEditor,
-    node: egui_graph_edit::NodeId,
-    input_name: &str,
-    weight: f32,
-    clips: &mut Vec<EvaluatedClip>,
-) {
-    let Ok(input) = editor.graph.graph.nodes[node].get_input(input_name) else {
-        return;
-    };
-    let Some(output) = editor.graph.graph.connection(input) else {
-        return;
-    };
-    evaluate_source_node(editor, output, weight, clips);
 }
 
 fn preview_output_node(editor: &AnimGraphEditor) -> Option<egui_graph_edit::NodeId> {
@@ -663,6 +742,7 @@ fn append_output_signature(
         }
         AnimNodeTemplate::FloatParameter
         | AnimNodeTemplate::BoolParameter
+        | AnimNodeTemplate::Remap
         | AnimNodeTemplate::Output => {}
     }
 }
@@ -722,6 +802,12 @@ fn node_input_bool(
     }
 }
 
+fn blend_weight(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId) -> f32 {
+    resolve_float_input(editor, node, "Weight")
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0)
+}
+
 fn resolve_float_input(
     editor: &AnimGraphEditor,
     node: egui_graph_edit::NodeId,
@@ -755,6 +841,18 @@ fn resolve_float_output(
     let node = editor.graph.graph.get_output(output).node;
     match editor.graph.graph.nodes[node].user_data.template {
         AnimNodeTemplate::FloatParameter => node_input_float(editor, node, "Value"),
+        AnimNodeTemplate::Remap => {
+            let value = resolve_float_input(editor, node, "Value")?;
+            let in_min = node_input_float(editor, node, "In Min").unwrap_or(0.0);
+            let in_max = node_input_float(editor, node, "In Max").unwrap_or(1.0);
+            let range = in_max - in_min;
+
+            if range.abs() <= f32::EPSILON {
+                Some(if value >= in_max { 1.0 } else { 0.0 })
+            } else {
+                Some(((value - in_min) / range).clamp(0.0, 1.0))
+            }
+        }
         _ => None,
     }
 }
@@ -820,4 +918,28 @@ fn animation_names(gltf: &Gltf) -> Vec<String> {
                 .unwrap_or_else(|| format!("Animation {index}"))
         })
         .collect()
+}
+
+fn import_gltf_asset(source: impl AsRef<Path>) -> Result<String, ImportGltfError> {
+    let source = source.as_ref();
+    let extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "glb" | "gltf") {
+        return Err(ImportGltfError::UnsupportedExtension);
+    }
+
+    let file_name = source.file_name().ok_or(ImportGltfError::MissingFileName)?;
+    fs::create_dir_all(IMPORT_DIR)?;
+    let destination = Path::new(IMPORT_DIR).join(file_name);
+
+    let source_canonical = source.canonicalize()?;
+    let destination_canonical = destination.canonicalize().ok();
+    if destination_canonical.as_ref() != Some(&source_canonical) {
+        fs::copy(source, &destination)?;
+    }
+
+    Ok(format!("imports/{}", file_name.to_string_lossy()))
 }
