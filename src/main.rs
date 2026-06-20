@@ -278,6 +278,16 @@ fn editor_ui(
         .frame(egui::Frame::NONE)
         .show(ctx, |ui| {
             editor.ui_state.preview_output = editor.preview_output;
+            editor.ui_state.live_one_shot_progress = preview
+                .as_deref()
+                .map(|preview_state| {
+                    preview_state
+                        .live_one_shots
+                        .iter()
+                        .map(|one_shot| (one_shot.editor_node, one_shot.progress))
+                        .collect()
+                })
+                .unwrap_or_default();
             editor.ui_state.available_clips = preview
                 .as_deref()
                 .and_then(|preview_state| preview::loaded_gltf(preview_state, &gltfs))
@@ -624,13 +634,17 @@ fn draw_connection_visualization(
                     &editor.graph.graph,
                     connection.input,
                     editor.preview_output,
+                    &editor.ui_state.live_one_shot_progress,
                 ),
             );
         }
 
-        let Some(value) =
-            connection_marker_value(&editor.graph.graph, connection.input, connection.output)
-        else {
+        let Some(value) = connection_marker_value(
+            &editor.graph.graph,
+            connection.input,
+            connection.output,
+            &editor.ui_state.live_one_shot_progress,
+        ) else {
             continue;
         };
 

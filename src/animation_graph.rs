@@ -693,6 +693,7 @@ pub struct AnimGraphUiState {
     pub weight_header_saturation: bool,
     pub contribution_borders: bool,
     pub preview_output: Option<NodeId>,
+    pub live_one_shot_progress: HashMap<NodeId, f32>,
     pub available_clips: Vec<String>,
     pub clip_picker: Option<ClipPickerState>,
     pub flow_phases: HashMap<(InputId, OutputId), f32>,
@@ -1073,7 +1074,7 @@ impl NodeDataTrait for AnimNodeData {
         ui: &mut egui::Ui,
         node_id: NodeId,
         graph: &Graph<Self, Self::DataType, Self::ValueType>,
-        _user_state: &mut Self::UserState,
+        user_state: &mut Self::UserState,
     ) -> Vec<NodeResponse<Self::Response, Self>>
     where
         Self::Response: UserResponseTrait,
@@ -1099,7 +1100,7 @@ impl NodeDataTrait for AnimNodeData {
         }
 
         if self.template.produces_pose() {
-            let weights = pose_node_weights(graph, node_id);
+            let weights = pose_node_weights(graph, node_id, &user_state.live_one_shot_progress);
             if weights.is_empty() {
                 ui.monospace("Weight: unreachable");
             } else {
@@ -1180,7 +1181,7 @@ impl NodeDataTrait for AnimNodeData {
         };
 
         Some(if user_state.weight_header_saturation {
-            saturate_by_value(base, node_header_value(graph, node_id))
+            saturate_by_value(base, node_header_value(graph, node_id, user_state))
         } else {
             base
         })
@@ -1197,7 +1198,12 @@ impl NodeDataTrait for AnimNodeData {
             return None;
         }
 
-        let contribution = node_contribution_value(graph, node_id, user_state.preview_output);
+        let contribution = node_contribution_value(
+            graph,
+            node_id,
+            user_state.preview_output,
+            &user_state.live_one_shot_progress,
+        );
         if contribution <= 0.001 {
             return None;
         }
@@ -1207,7 +1213,11 @@ impl NodeDataTrait for AnimNodeData {
     }
 }
 
-fn node_header_value(graph: &Graph<AnimNodeData, AnimDataType, AnimValue>, node_id: NodeId) -> f32 {
+fn node_header_value(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node_id: NodeId,
+    user_state: &AnimGraphUiState,
+) -> f32 {
     let node = &graph.nodes[node_id];
     match node.user_data.template {
         AnimNodeTemplate::Clip
@@ -1215,10 +1225,12 @@ fn node_header_value(graph: &Graph<AnimNodeData, AnimDataType, AnimValue>, node_
         | AnimNodeTemplate::WeightedBlend
         | AnimNodeTemplate::OneShot
         | AnimNodeTemplate::State
-        | AnimNodeTemplate::Transition => pose_node_weights(graph, node_id)
-            .into_iter()
-            .map(|weight| weight.effective_weight)
-            .fold(0.0, f32::max),
+        | AnimNodeTemplate::Transition => {
+            pose_node_weights(graph, node_id, &user_state.live_one_shot_progress)
+                .into_iter()
+                .map(|weight| weight.effective_weight)
+                .fold(0.0, f32::max)
+        }
         AnimNodeTemplate::FloatParameter => graph_node_input_float(graph, node_id, "Value")
             .unwrap_or(0.0)
             .clamp(0.0, 1.0),
@@ -1265,6 +1277,7 @@ fn node_contribution_value(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     node_id: NodeId,
     preview_output: Option<NodeId>,
+    live_one_shot_progress: &HashMap<NodeId, f32>,
 ) -> f32 {
     if matches!(
         graph.nodes[node_id].user_data.template,
@@ -1279,7 +1292,7 @@ fn node_contribution_value(
         };
     }
 
-    pose_node_weights_for_output(graph, node_id, preview_output)
+    pose_node_weights_for_output(graph, node_id, preview_output, live_one_shot_progress)
         .into_iter()
         .map(|weight| weight.effective_weight)
         .fold(0.0, f32::max)
@@ -1302,18 +1315,29 @@ struct PoseNodeWeight {
 fn pose_node_weights(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     target: NodeId,
+    live_one_shot_progress: &HashMap<NodeId, f32>,
 ) -> Vec<PoseNodeWeight> {
-    pose_node_weights_for_output(graph, target, None)
+    pose_node_weights_for_output(graph, target, None, live_one_shot_progress)
 }
 
 fn pose_node_weights_for_output(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     target: NodeId,
     preview_output: Option<NodeId>,
+    live_one_shot_progress: &HashMap<NodeId, f32>,
 ) -> Vec<PoseNodeWeight> {
     let mut weights = Vec::new();
     for output in output_pose_sources(graph, preview_output) {
-        collect_pose_node_weights(graph, output, target, 1.0, 1.0, &mut weights, 0);
+        collect_pose_node_weights(
+            graph,
+            output,
+            target,
+            1.0,
+            1.0,
+            &mut weights,
+            live_one_shot_progress,
+            0,
+        );
     }
     weights
 }
@@ -1352,6 +1376,7 @@ fn collect_pose_node_weights(
     node_weight: f32,
     effective_weight: f32,
     weights: &mut Vec<PoseNodeWeight>,
+    live_one_shot_progress: &HashMap<NodeId, f32>,
     depth: usize,
 ) {
     if depth > 64 {
@@ -1380,6 +1405,7 @@ fn collect_pose_node_weights(
                 effective_weight,
                 target,
                 weights,
+                live_one_shot_progress,
                 depth + 1,
             );
             collect_weighted_pose_input(
@@ -1391,6 +1417,7 @@ fn collect_pose_node_weights(
                 effective_weight,
                 target,
                 weights,
+                live_one_shot_progress,
                 depth + 1,
             );
         }
@@ -1417,6 +1444,7 @@ fn collect_pose_node_weights(
                 effective_weight,
                 target,
                 weights,
+                live_one_shot_progress,
                 depth + 1,
             );
             collect_weighted_pose_input(
@@ -1428,16 +1456,12 @@ fn collect_pose_node_weights(
                 effective_weight,
                 target,
                 weights,
+                live_one_shot_progress,
                 depth + 1,
             );
         }
         AnimNodeTemplate::OneShot => {
-            let action = if resolve_graph_bool_input(graph, node_id, "Trigger", 0).unwrap_or(false)
-            {
-                1.0
-            } else {
-                0.0
-            };
+            let action = one_shot_visual_progress(graph, node_id, live_one_shot_progress);
             collect_weighted_pose_input(
                 graph,
                 node_id,
@@ -1447,6 +1471,7 @@ fn collect_pose_node_weights(
                 effective_weight,
                 target,
                 weights,
+                live_one_shot_progress,
                 depth + 1,
             );
             collect_weighted_pose_input(
@@ -1458,6 +1483,7 @@ fn collect_pose_node_weights(
                 effective_weight,
                 target,
                 weights,
+                live_one_shot_progress,
                 depth + 1,
             );
         }
@@ -1471,6 +1497,7 @@ fn collect_pose_node_weights(
                 effective_weight,
                 target,
                 weights,
+                live_one_shot_progress,
                 depth + 1,
             );
         }
@@ -1487,6 +1514,7 @@ fn collect_pose_node_weights(
                 effective_weight,
                 target,
                 weights,
+                live_one_shot_progress,
                 depth + 1,
             );
             collect_weighted_pose_input(
@@ -1498,6 +1526,7 @@ fn collect_pose_node_weights(
                 effective_weight,
                 target,
                 weights,
+                live_one_shot_progress,
                 depth + 1,
             );
         }
@@ -1524,6 +1553,7 @@ fn collect_weighted_pose_input(
     parent_effective_weight: f32,
     target: NodeId,
     weights: &mut Vec<PoseNodeWeight>,
+    live_one_shot_progress: &HashMap<NodeId, f32>,
     depth: usize,
 ) {
     let Ok(input) = graph.nodes[node].get_input(input_name) else {
@@ -1539,6 +1569,7 @@ fn collect_weighted_pose_input(
         child_weight,
         parent_effective_weight * child_effective_weight,
         weights,
+        live_one_shot_progress,
         depth,
     );
 }
@@ -1547,6 +1578,7 @@ pub fn connection_marker_value(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     input: InputId,
     output: OutputId,
+    live_one_shot_progress: &HashMap<NodeId, f32>,
 ) -> Option<f32> {
     let input_param = graph.get_input(input);
     match &input_param.typ {
@@ -1560,7 +1592,7 @@ pub fn connection_marker_value(
         AnimDataType::Bool => {
             resolve_graph_bool_output(graph, output, 0).map(|value| if value { 1.0 } else { 0.0 })
         }
-        AnimDataType::Pose => pose_connection_marker_value(graph, input),
+        AnimDataType::Pose => pose_connection_marker_value(graph, input, live_one_shot_progress),
         AnimDataType::Text => None,
     }
 }
@@ -1569,16 +1601,22 @@ pub fn connection_contribution_value(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     input: InputId,
     preview_output: Option<NodeId>,
+    live_one_shot_progress: &HashMap<NodeId, f32>,
 ) -> f32 {
     let input_param = graph.get_input(input);
-    let node_contribution =
-        node_contribution_value(graph, input_param.node, preview_output).clamp(0.0, 1.0);
+    let node_contribution = node_contribution_value(
+        graph,
+        input_param.node,
+        preview_output,
+        live_one_shot_progress,
+    )
+    .clamp(0.0, 1.0);
     if node_contribution <= 0.001 {
         return 0.0;
     }
 
     match input_param.typ {
-        AnimDataType::Pose => pose_connection_marker_value(graph, input)
+        AnimDataType::Pose => pose_connection_marker_value(graph, input, live_one_shot_progress)
             .map(|value| value * node_contribution)
             .unwrap_or(node_contribution),
         AnimDataType::Float | AnimDataType::Bool | AnimDataType::Text => node_contribution,
@@ -1588,6 +1626,7 @@ pub fn connection_contribution_value(
 fn pose_connection_marker_value(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     input: InputId,
+    live_one_shot_progress: &HashMap<NodeId, f32>,
 ) -> Option<f32> {
     let input_param = graph.get_input(input);
     let node_id = input_param.node;
@@ -1603,12 +1642,7 @@ fn pose_connection_marker_value(
             _ => None,
         },
         AnimNodeTemplate::OneShot => {
-            let action = if resolve_graph_bool_input(graph, node_id, "Trigger", 0).unwrap_or(false)
-            {
-                1.0
-            } else {
-                0.0
-            };
+            let action = one_shot_visual_progress(graph, node_id, live_one_shot_progress);
             match input_name {
                 "Base" => Some(1.0 - action),
                 "Action" => Some(action),
@@ -1641,6 +1675,24 @@ fn pose_connection_marker_value(
         AnimNodeTemplate::Output => (input_name == "Pose").then_some(1.0),
         _ => None,
     }
+}
+
+fn one_shot_visual_progress(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+    live_one_shot_progress: &HashMap<NodeId, f32>,
+) -> f32 {
+    live_one_shot_progress
+        .get(&node)
+        .copied()
+        .unwrap_or_else(|| {
+            if resolve_graph_bool_input(graph, node, "Trigger", 0).unwrap_or(false) {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .clamp(0.0, 1.0)
 }
 
 fn graph_blend_weight(graph: &Graph<AnimNodeData, AnimDataType, AnimValue>, node: NodeId) -> f32 {
