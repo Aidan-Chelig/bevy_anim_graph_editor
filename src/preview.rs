@@ -7,7 +7,7 @@ use bevy::{
 };
 use bevy_anim_graph_editor::{
     animation_graph::AnimGraphEditor,
-    runtime::{self, LiveClipNode, LiveNodeWeight, LiveTransition},
+    runtime::{self, LiveClipNode, LiveNodeWeight, LiveOneShot, LiveTransition},
 };
 
 const IMPORT_DIR: &str = "assets/imports";
@@ -24,8 +24,11 @@ pub struct PreviewState {
     pub live_clips: Vec<LiveClipNode>,
     pub live_node_weights: Vec<LiveNodeWeight>,
     pub live_transitions: Vec<LiveTransition>,
+    pub live_one_shots: Vec<LiveOneShot>,
+    pub handled_completions: Vec<egui_graph_edit::NodeId>,
     pub scene_count: usize,
     pub player_count: usize,
+    pub playback_active: bool,
     pub apply_requested: bool,
     pub auto_apply: bool,
     pub last_applied_signature: Option<String>,
@@ -46,8 +49,11 @@ impl PreviewState {
             live_clips: Vec::new(),
             live_node_weights: Vec::new(),
             live_transitions: Vec::new(),
+            live_one_shots: Vec::new(),
+            handled_completions: Vec::new(),
             scene_count: 0,
             player_count: 0,
+            playback_active: false,
             apply_requested: false,
             auto_apply: true,
             last_applied_signature: None,
@@ -76,6 +82,8 @@ impl PreviewState {
         self.live_clips.clear();
         self.live_node_weights.clear();
         self.live_transitions.clear();
+        self.live_one_shots.clear();
+        self.handled_completions.clear();
         self.active_animation = 0;
         self.scene_count = 0;
         self.player_count = 0;
@@ -266,6 +274,7 @@ pub fn build_preview_animation_graph(
     state.live_clips.clear();
     state.live_node_weights.clear();
     state.live_transitions.clear();
+    state.live_one_shots.clear();
     state.active_animation = 0;
     state.status = format!("Loaded {} animation(s)", state.animations.len());
 }
@@ -279,6 +288,11 @@ pub fn update_preview_diagnostics(
     };
 
     state.player_count = players.iter().count();
+    state.playback_active = players.iter().any(|player| {
+        player
+            .playing_animations()
+            .any(|(_, animation)| !animation.is_paused() && !animation.is_finished())
+    });
 }
 
 pub fn attach_preview_animation_graph(
@@ -354,10 +368,14 @@ pub fn apply_editor_graph_to_preview(
         return;
     };
 
-    let signature = runtime::preview_tree_signature(&editor);
+    let manual_apply = state.apply_requested;
+    let signature = if manual_apply || (state.auto_apply && editor.is_changed()) {
+        runtime::preview_tree_signature(&editor)
+    } else {
+        None
+    };
     let should_auto_apply =
         state.auto_apply && signature.is_some() && signature != state.last_applied_signature;
-    let manual_apply = state.apply_requested;
 
     if !manual_apply && !should_auto_apply {
         return;
@@ -383,6 +401,8 @@ pub fn apply_editor_graph_to_preview(
             state.live_clips = compiled.live_clips;
             state.live_node_weights = compiled.live_node_weights;
             state.live_transitions = compiled.live_transitions;
+            state.live_one_shots = compiled.live_one_shots;
+            state.handled_completions.clear();
             state.active_animation = 0;
             state.last_applied_signature = signature;
             state.status = format!("Applied editor graph: {}", compiled.summary);
@@ -408,9 +428,10 @@ pub fn apply_editor_graph_to_preview(
 
 pub fn sync_editor_graph_to_preview(
     time: Res<Time>,
-    editor: Res<AnimGraphEditor>,
+    mut editor: ResMut<AnimGraphEditor>,
     state: Option<ResMut<PreviewState>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    animation_clips: Res<Assets<AnimationClip>>,
     mut players: Query<&mut AnimationPlayer>,
 ) {
     let Some(mut state) = state else {
@@ -420,6 +441,7 @@ pub fn sync_editor_graph_to_preview(
     if state.live_clips.is_empty()
         && state.live_node_weights.is_empty()
         && state.live_transitions.is_empty()
+        && state.live_one_shots.is_empty()
     {
         return;
     }
@@ -428,16 +450,39 @@ pub fn sync_editor_graph_to_preview(
         && let Some(graph) = graphs.get_mut(graph_handle)
     {
         let live_node_weights = state.live_node_weights.clone();
+        let mut live_transitions = std::mem::take(&mut state.live_transitions);
+        let mut live_one_shots = std::mem::take(&mut state.live_one_shots);
         runtime::tick_animation_graph(
             &editor,
             graph,
             &live_node_weights,
-            &mut state.live_transitions,
+            &mut live_transitions,
+            &mut live_one_shots,
             time.delta_secs(),
         );
+        state.live_transitions = live_transitions;
+        state.live_one_shots = live_one_shots;
     }
 
+    let graph = state
+        .graph
+        .as_ref()
+        .and_then(|graph_handle| graphs.get(graph_handle));
+
     for mut player in &mut players {
+        let live_clips = state.live_clips.clone();
+        let events = runtime::apply_completion_actions(
+            &mut editor,
+            &live_clips,
+            &mut state.handled_completions,
+            &player,
+            graph,
+        );
+        if let Some(event) = events.last() {
+            state.status = event.clone();
+        }
+
+        let mut clip_durations = Vec::new();
         for live_clip in &state.live_clips {
             if !player.is_playing_animation(live_clip.animation) {
                 player.play(live_clip.animation).repeat();
@@ -447,10 +492,39 @@ pub fn sync_editor_graph_to_preview(
                 continue;
             };
 
-            let speed = runtime::clip_speed(&editor, live_clip.editor_node);
-            active_animation.set_weight(1.0);
-            active_animation.set_speed(speed);
+            if state.live_one_shots.iter().any(|one_shot| {
+                one_shot.restart_requested && live_clip.playback_node == one_shot.editor_node
+            }) {
+                active_animation.replay();
+                active_animation.resume();
+            }
+
+            let clip_duration = graph
+                .and_then(|graph| graph.get(live_clip.animation))
+                .and_then(|node| match &node.node_type {
+                    AnimationNodeType::Clip(handle) => animation_clips.get(handle),
+                    _ => None,
+                })
+                .map(AnimationClip::duration)
+                .unwrap_or(0.0);
+            clip_durations.push((live_clip.animation, clip_duration));
+            runtime::apply_clip_playback(&editor, *live_clip, active_animation, clip_duration);
         }
+
+        let live_clips = state.live_clips.clone();
+        runtime::update_one_shot_completion_targets(
+            &live_clips,
+            &mut state.live_one_shots,
+            &player,
+            &clip_durations,
+        );
+        for one_shot in &mut state.live_one_shots {
+            one_shot.restart_requested = false;
+        }
+    }
+
+    if editor.consume_trigger_parameters() {
+        state.handled_completions.clear();
     }
 }
 
@@ -477,18 +551,42 @@ pub fn toggle_preview_playback(
     }
 
     for mut player in &mut players {
-        let Some((animation, _)) = player.playing_animations().next() else {
-            continue;
-        };
-        let animation = *animation;
-        let Some(active_animation) = player.animation_mut(animation) else {
+        let animations: Vec<_> = player
+            .playing_animations()
+            .map(|(animation, _)| *animation)
+            .collect();
+        if animations.is_empty() {
             continue;
         };
 
-        if active_animation.is_paused() {
-            active_animation.resume();
-        } else {
-            active_animation.pause();
+        let should_resume = animations.iter().all(|animation| {
+            player
+                .animation(*animation)
+                .is_none_or(|animation| animation.is_paused())
+        });
+
+        for animation in animations {
+            let Some(active_animation) = player.animation_mut(animation) else {
+                continue;
+            };
+            if should_resume {
+                active_animation.resume();
+            } else {
+                active_animation.pause();
+            }
+        }
+
+        if should_resume {
+            // Restart one-shot animations that had already completed before being resumed.
+            for animation in player
+                .playing_animations()
+                .filter_map(|(animation, active)| active.is_finished().then_some(*animation))
+                .collect::<Vec<_>>()
+            {
+                if let Some(active_animation) = player.animation_mut(animation) {
+                    active_animation.replay();
+                }
+            }
         }
     }
 }
