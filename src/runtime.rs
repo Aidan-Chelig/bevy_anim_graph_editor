@@ -5,7 +5,9 @@ use bevy::{
     reflect::TypePath,
 };
 
-use crate::animation_graph::{AnimGraphEditor, AnimNodeTemplate, AnimValue, SavedAnimGraph};
+use crate::animation_graph::{
+    AnimGraphEditor, AnimNodeTemplate, AnimValue, MIN_TRANSITION_DURATION, SavedAnimGraph,
+};
 
 pub struct AnimGraphRuntimePlugin;
 
@@ -78,8 +80,10 @@ pub struct AnimGraphRuntime {
     pub graph: Option<Handle<AnimationGraph>>,
     pub playable_nodes: Vec<AnimationNodeIndex>,
     pub playable_names: Vec<String>,
+    pub native_node_names: Vec<(AnimationNodeIndex, String)>,
     pub live_clips: Vec<LiveClipNode>,
     pub live_node_weights: Vec<LiveNodeWeight>,
+    pub live_transitions: Vec<LiveTransition>,
     pub status: String,
 }
 
@@ -91,8 +95,10 @@ impl AnimGraphRuntime {
             graph: None,
             playable_nodes: Vec::new(),
             playable_names: Vec::new(),
+            native_node_names: Vec::new(),
             live_clips: Vec::new(),
             live_node_weights: Vec::new(),
+            live_transitions: Vec::new(),
             status: "Waiting for GLB".to_string(),
         }
     }
@@ -101,8 +107,10 @@ impl AnimGraphRuntime {
         self.graph = None;
         self.playable_nodes.clear();
         self.playable_names.clear();
+        self.native_node_names.clear();
         self.live_clips.clear();
         self.live_node_weights.clear();
+        self.live_transitions.clear();
         self.status = "Rebuild requested".to_string();
     }
 
@@ -110,6 +118,7 @@ impl AnimGraphRuntime {
         let mut editor = AnimGraphEditor::default();
         editor.graph = project.project.graph.clone();
         editor.preview_output = project.project.preview_output;
+        editor.ensure_state_inputs();
         editor.clamp_float_values();
         Self::new(editor, gltf)
     }
@@ -128,6 +137,12 @@ pub struct LiveNodeWeight {
 }
 
 #[derive(Clone, Copy)]
+pub struct LiveTransition {
+    pub editor_node: egui_graph_edit::NodeId,
+    pub progress: f32,
+}
+
+#[derive(Clone, Copy)]
 pub enum WeightDriver {
     BlendA(egui_graph_edit::NodeId),
     BlendB(egui_graph_edit::NodeId),
@@ -138,26 +153,14 @@ pub enum WeightDriver {
 }
 
 impl WeightDriver {
-    pub fn resolve(self, editor: &AnimGraphEditor) -> f32 {
+    pub fn resolve(self, editor: &AnimGraphEditor, transitions: &[LiveTransition]) -> f32 {
         match self {
             Self::BlendA(node) => 1.0 - blend_weight(editor, node),
             Self::BlendB(node) => blend_weight(editor, node),
             Self::WeightedBlendA(node) => graph_weight_input(editor, node, "A Weight", 1.0),
             Self::WeightedBlendB(node) => graph_weight_input(editor, node, "B Weight", 1.0),
-            Self::TransitionFrom(node) => {
-                if resolve_bool_input(editor, node, "Condition").unwrap_or(false) {
-                    0.0
-                } else {
-                    1.0
-                }
-            }
-            Self::TransitionTo(node) => {
-                if resolve_bool_input(editor, node, "Condition").unwrap_or(false) {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
+            Self::TransitionFrom(node) => 1.0 - transition_progress(editor, transitions, node),
+            Self::TransitionTo(node) => transition_progress(editor, transitions, node),
         }
     }
 }
@@ -166,8 +169,10 @@ pub struct CompiledEditorGraph {
     pub graph: AnimationGraph,
     pub playable_nodes: Vec<AnimationNodeIndex>,
     pub playable_names: Vec<String>,
+    pub native_node_names: Vec<(AnimationNodeIndex, String)>,
     pub live_clips: Vec<LiveClipNode>,
     pub live_node_weights: Vec<LiveNodeWeight>,
+    pub live_transitions: Vec<LiveTransition>,
     pub summary: String,
 }
 
@@ -219,8 +224,10 @@ pub fn compile_runtime_graphs(
                 runtime.graph = Some(graph_handle.clone());
                 runtime.playable_nodes = compiled.playable_nodes;
                 runtime.playable_names = compiled.playable_names;
+                runtime.native_node_names = compiled.native_node_names;
                 runtime.live_clips = compiled.live_clips;
                 runtime.live_node_weights = compiled.live_node_weights;
+                runtime.live_transitions = compiled.live_transitions;
                 runtime.status = format!("Applied graph: {}", compiled.summary);
 
                 commands
@@ -241,17 +248,37 @@ pub fn compile_runtime_graphs(
 }
 
 pub fn sync_runtime_graphs(
-    runtimes: Query<(&AnimGraphRuntime, &AnimationGraphHandle)>,
+    time: Res<Time>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
-    mut players: Query<(&AnimGraphRuntime, &mut AnimationPlayer)>,
+    mut queries: ParamSet<(
+        Query<(&mut AnimGraphRuntime, &AnimationGraphHandle)>,
+        Query<(&AnimGraphRuntime, &mut AnimationPlayer)>,
+    )>,
 ) {
-    for (runtime, graph_handle) in &runtimes {
+    for (mut runtime, graph_handle) in &mut queries.p0() {
+        let transition_progress: Vec<_> = runtime
+            .live_transitions
+            .iter()
+            .map(|transition| {
+                advance_transition_progress(&runtime.editor, *transition, time.delta_secs())
+            })
+            .collect();
+        for (transition, progress) in runtime.live_transitions.iter_mut().zip(transition_progress) {
+            transition.progress = progress;
+        }
+        let live_transitions = runtime.live_transitions.clone();
+
         if let Some(graph) = graphs.get_mut(graph_handle) {
-            sync_animation_graph_weights(&runtime.editor, graph, &runtime.live_node_weights);
+            sync_animation_graph_weights_with_transitions(
+                &runtime.editor,
+                graph,
+                &runtime.live_node_weights,
+                &live_transitions,
+            );
         }
     }
 
-    for (runtime, mut player) in &mut players {
+    for (runtime, mut player) in &mut queries.p1() {
         for live_clip in &runtime.live_clips {
             if !player.is_playing_animation(live_clip.animation) {
                 player.play(live_clip.animation).repeat();
@@ -298,8 +325,10 @@ pub fn compile_editor_graph(
     let mut graph = AnimationGraph::new();
     let mut playable_nodes = Vec::new();
     let mut playable_names = Vec::new();
+    let mut native_node_names = Vec::new();
     let mut live_clips = Vec::new();
     let mut live_node_weights = Vec::new();
+    let mut live_transitions = Vec::new();
     let root = graph.root;
     compile_source_node(
         editor,
@@ -309,8 +338,10 @@ pub fn compile_editor_graph(
         root,
         &mut playable_nodes,
         &mut playable_names,
+        &mut native_node_names,
         &mut live_clips,
         &mut live_node_weights,
+        &mut live_transitions,
         None,
     )?;
 
@@ -324,10 +355,47 @@ pub fn compile_editor_graph(
         graph,
         playable_nodes,
         playable_names,
+        native_node_names,
         live_clips,
         live_node_weights,
+        live_transitions,
         summary,
     })
+}
+
+pub fn tick_animation_graph(
+    editor: &AnimGraphEditor,
+    graph: &mut AnimationGraph,
+    live_node_weights: &[LiveNodeWeight],
+    live_transitions: &mut [LiveTransition],
+    delta_secs: f32,
+) {
+    for transition in live_transitions.iter_mut() {
+        transition.progress = advance_transition_progress(editor, *transition, delta_secs);
+    }
+
+    sync_animation_graph_weights_with_transitions(
+        editor,
+        graph,
+        live_node_weights,
+        live_transitions,
+    );
+}
+
+fn sync_animation_graph_weights_with_transitions(
+    editor: &AnimGraphEditor,
+    graph: &mut AnimationGraph,
+    live_node_weights: &[LiveNodeWeight],
+    live_transitions: &[LiveTransition],
+) {
+    for live_weight in live_node_weights {
+        if let Some(node) = graph.get_mut(live_weight.animation) {
+            node.weight = live_weight
+                .driver
+                .resolve(editor, live_transitions)
+                .clamp(0.0, 1.0);
+        }
+    }
 }
 
 pub fn sync_animation_graph_weights(
@@ -337,9 +405,56 @@ pub fn sync_animation_graph_weights(
 ) {
     for live_weight in live_node_weights {
         if let Some(node) = graph.get_mut(live_weight.animation) {
-            node.weight = live_weight.driver.resolve(editor).clamp(0.0, 1.0);
+            node.weight = live_weight.driver.resolve(editor, &[]).clamp(0.0, 1.0);
         }
     }
+}
+
+fn advance_transition_progress(
+    editor: &AnimGraphEditor,
+    transition: LiveTransition,
+    delta_secs: f32,
+) -> f32 {
+    let target = transition_target(editor, transition.editor_node);
+    let duration = transition_duration(editor, transition.editor_node);
+
+    if duration <= f32::EPSILON {
+        return target;
+    }
+
+    let step = (delta_secs / duration).clamp(0.0, 1.0);
+    if transition.progress < target {
+        (transition.progress + step).min(target)
+    } else {
+        (transition.progress - step).max(target)
+    }
+}
+
+fn transition_progress(
+    editor: &AnimGraphEditor,
+    live_transitions: &[LiveTransition],
+    node: egui_graph_edit::NodeId,
+) -> f32 {
+    live_transitions
+        .iter()
+        .find_map(|transition| {
+            (transition.editor_node == node).then_some(transition.progress.clamp(0.0, 1.0))
+        })
+        .unwrap_or_else(|| transition_target(editor, node))
+}
+
+fn transition_target(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId) -> f32 {
+    if resolve_bool_input(editor, node, "Condition").unwrap_or(false) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn transition_duration(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId) -> f32 {
+    resolve_float_input(editor, node, "Duration")
+        .unwrap_or(0.2)
+        .max(MIN_TRANSITION_DURATION)
 }
 
 pub fn clip_speed(editor: &AnimGraphEditor, clip_node: egui_graph_edit::NodeId) -> f32 {
@@ -350,10 +465,10 @@ pub fn clip_speed(editor: &AnimGraphEditor, clip_node: egui_graph_edit::NodeId) 
 
 pub fn native_tree_lines(
     graph: &AnimationGraph,
-    clip_names: &[(AnimationNodeIndex, String)],
+    node_names: &[(AnimationNodeIndex, String)],
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    append_native_tree_lines(graph, graph.root, clip_names, 0, &mut lines);
+    append_native_tree_lines(graph, graph.root, node_names, 0, &mut lines);
     lines
 }
 
@@ -369,7 +484,7 @@ pub fn preview_tree_signature(editor: &AnimGraphEditor) -> Option<String> {
 fn append_native_tree_lines(
     graph: &AnimationGraph,
     node_index: AnimationNodeIndex,
-    clip_names: &[(AnimationNodeIndex, String)],
+    node_names: &[(AnimationNodeIndex, String)],
     depth: usize,
     lines: &mut Vec<String>,
 ) {
@@ -379,11 +494,14 @@ fn append_native_tree_lines(
 
     let indent = "  ".repeat(depth);
     let label = match &node.node_type {
-        AnimationNodeType::Clip(_) => clip_names
+        AnimationNodeType::Clip(_) => node_names
             .iter()
             .find_map(|(index, name)| (*index == node_index).then_some(name.as_str()))
             .unwrap_or("Clip"),
-        AnimationNodeType::Blend => "Blend",
+        AnimationNodeType::Blend => node_names
+            .iter()
+            .find_map(|(index, name)| (*index == node_index).then_some(name.as_str()))
+            .unwrap_or("Blend"),
         AnimationNodeType::Add => "Add",
     };
     lines.push(format!(
@@ -395,7 +513,7 @@ fn append_native_tree_lines(
     let mut children: Vec<_> = graph.graph.neighbors(node_index).collect();
     children.sort_by_key(|child| child.index());
     for child in children {
-        append_native_tree_lines(graph, child, clip_names, depth + 1, lines);
+        append_native_tree_lines(graph, child, node_names, depth + 1, lines);
     }
 }
 
@@ -407,14 +525,16 @@ fn compile_source_node(
     parent: AnimationNodeIndex,
     playable_nodes: &mut Vec<AnimationNodeIndex>,
     playable_names: &mut Vec<String>,
+    native_node_names: &mut Vec<(AnimationNodeIndex, String)>,
     live_clips: &mut Vec<LiveClipNode>,
     live_node_weights: &mut Vec<LiveNodeWeight>,
+    live_transitions: &mut Vec<LiveTransition>,
     weight_driver: Option<WeightDriver>,
 ) -> Result<AnimationNodeIndex, String> {
     let node_id = editor.graph.graph.get_output(output).node;
     let node = &editor.graph.graph.nodes[node_id];
     let initial_weight = weight_driver
-        .map(|driver| driver.resolve(editor))
+        .map(|driver| driver.resolve(editor, &[]))
         .unwrap_or(1.0)
         .clamp(0.0, 1.0);
 
@@ -423,6 +543,7 @@ fn compile_source_node(
             let clip_label = node_input_text(editor, node_id, "Clip").unwrap_or_default();
             let (clip, clip_name) = resolve_clip(gltf, &clip_label)?;
             let node = graph.add_clip(clip, initial_weight, parent);
+            native_node_names.push((node, clip_name.clone()));
             if let Some(driver) = weight_driver {
                 live_node_weights.push(LiveNodeWeight {
                     animation: node,
@@ -454,8 +575,10 @@ fn compile_source_node(
                 blend,
                 playable_nodes,
                 playable_names,
+                native_node_names,
                 live_clips,
                 live_node_weights,
+                live_transitions,
                 Some(WeightDriver::BlendA(node_id)),
             )?;
             compile_connected_input(
@@ -467,8 +590,10 @@ fn compile_source_node(
                 blend,
                 playable_nodes,
                 playable_names,
+                native_node_names,
                 live_clips,
                 live_node_weights,
+                live_transitions,
                 Some(WeightDriver::BlendB(node_id)),
             )?;
             Ok(blend)
@@ -490,8 +615,10 @@ fn compile_source_node(
                 blend,
                 playable_nodes,
                 playable_names,
+                native_node_names,
                 live_clips,
                 live_node_weights,
+                live_transitions,
                 Some(WeightDriver::WeightedBlendA(node_id)),
             )?;
             compile_connected_input(
@@ -503,27 +630,46 @@ fn compile_source_node(
                 blend,
                 playable_nodes,
                 playable_names,
+                native_node_names,
                 live_clips,
                 live_node_weights,
+                live_transitions,
                 Some(WeightDriver::WeightedBlendB(node_id)),
             )?;
             Ok(blend)
         }
-        AnimNodeTemplate::State => compile_connected_input(
-            editor,
-            gltf,
-            node_id,
-            "Pose",
-            graph,
-            parent,
-            playable_nodes,
-            playable_names,
-            live_clips,
-            live_node_weights,
-            weight_driver,
-        ),
+        AnimNodeTemplate::State => {
+            let state = graph.add_blend(initial_weight, parent);
+            native_node_names.push((state, format!("State: {}", state_name(editor, node_id))));
+            if let Some(driver) = weight_driver {
+                live_node_weights.push(LiveNodeWeight {
+                    animation: state,
+                    driver,
+                });
+            }
+            compile_connected_input(
+                editor,
+                gltf,
+                node_id,
+                "Pose",
+                graph,
+                state,
+                playable_nodes,
+                playable_names,
+                native_node_names,
+                live_clips,
+                live_node_weights,
+                live_transitions,
+                None,
+            )?;
+            Ok(state)
+        }
         AnimNodeTemplate::Transition => {
             let transition = graph.add_blend(initial_weight, parent);
+            live_transitions.push(LiveTransition {
+                editor_node: node_id,
+                progress: transition_target(editor, node_id),
+            });
             if let Some(driver) = weight_driver {
                 live_node_weights.push(LiveNodeWeight {
                     animation: transition,
@@ -539,8 +685,10 @@ fn compile_source_node(
                 transition,
                 playable_nodes,
                 playable_names,
+                native_node_names,
                 live_clips,
                 live_node_weights,
+                live_transitions,
                 Some(WeightDriver::TransitionFrom(node_id)),
             )?;
             compile_connected_input(
@@ -552,8 +700,10 @@ fn compile_source_node(
                 transition,
                 playable_nodes,
                 playable_names,
+                native_node_names,
                 live_clips,
                 live_node_weights,
+                live_transitions,
                 Some(WeightDriver::TransitionTo(node_id)),
             )?;
             Ok(transition)
@@ -574,8 +724,10 @@ fn compile_connected_input(
     parent: AnimationNodeIndex,
     playable_nodes: &mut Vec<AnimationNodeIndex>,
     playable_names: &mut Vec<String>,
+    native_node_names: &mut Vec<(AnimationNodeIndex, String)>,
     live_clips: &mut Vec<LiveClipNode>,
     live_node_weights: &mut Vec<LiveNodeWeight>,
+    live_transitions: &mut Vec<LiveTransition>,
     weight_driver: Option<WeightDriver>,
 ) -> Result<AnimationNodeIndex, String> {
     let input = editor.graph.graph.nodes[node]
@@ -594,8 +746,10 @@ fn compile_connected_input(
         parent,
         playable_nodes,
         playable_names,
+        native_node_names,
         live_clips,
         live_node_weights,
+        live_transitions,
         weight_driver,
     )
 }
@@ -636,6 +790,9 @@ fn append_output_signature(
             append_connected_signature(editor, node_id, "B", signature);
         }
         AnimNodeTemplate::State => {
+            signature.push_str("state:");
+            signature.push_str(&state_name(editor, node_id));
+            signature.push(';');
             append_connected_signature(editor, node_id, "Pose", signature);
         }
         AnimNodeTemplate::Transition => {
@@ -678,6 +835,12 @@ fn node_input_text(
         AnimValue::Text(value) => Some(value.clone()),
         _ => None,
     }
+}
+
+fn state_name(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId) -> String {
+    node_input_text(editor, node, "Name")
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| editor.graph.graph.nodes[node].label.clone())
 }
 
 fn node_input_float(

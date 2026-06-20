@@ -207,16 +207,13 @@ fn editor_ui(
                 ui.heading("Native Bevy Tree");
                 if let Some(graph_handle) = preview.graph.as_ref() {
                     if let Some(graph) = graphs.get(graph_handle) {
-                        let clip_names: Vec<_> = preview
-                            .animations
-                            .iter()
-                            .copied()
-                            .zip(preview.animation_names.iter().cloned())
-                            .collect();
                         egui::ScrollArea::vertical()
+                            .id_salt("native_bevy_tree_scroll")
                             .max_height(220.0)
                             .show(ui, |ui| {
-                                for line in runtime::native_tree_lines(graph, &clip_names) {
+                                for line in
+                                    runtime::native_tree_lines(graph, &preview.native_node_names)
+                                {
                                     ui.monospace(line);
                                 }
                             });
@@ -267,6 +264,7 @@ fn editor_ui(
                             }
                             ui.separator();
                             egui::ScrollArea::vertical()
+                                .id_salt("clip_picker_scroll")
                                 .max_height(180.0)
                                 .show(ui, |ui| {
                                     for clip in clips {

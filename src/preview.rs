@@ -6,7 +6,7 @@ use bevy::{
 };
 use bevy_anim_graph_editor::{
     animation_graph::AnimGraphEditor,
-    runtime::{self, LiveClipNode, LiveNodeWeight},
+    runtime::{self, LiveClipNode, LiveNodeWeight, LiveTransition},
 };
 
 const PREVIEW_ASSET: &str = "character.glb";
@@ -19,9 +19,11 @@ pub struct PreviewState {
     pub graph: Option<Handle<AnimationGraph>>,
     pub animations: Vec<AnimationNodeIndex>,
     pub animation_names: Vec<String>,
+    pub native_node_names: Vec<(AnimationNodeIndex, String)>,
     pub active_animation: usize,
     pub live_clips: Vec<LiveClipNode>,
     pub live_node_weights: Vec<LiveNodeWeight>,
+    pub live_transitions: Vec<LiveTransition>,
     pub scene_count: usize,
     pub player_count: usize,
     pub apply_requested: bool,
@@ -39,9 +41,11 @@ impl PreviewState {
             graph: None,
             animations: Vec::new(),
             animation_names: Vec::new(),
+            native_node_names: Vec::new(),
             active_animation: 0,
             live_clips: Vec::new(),
             live_node_weights: Vec::new(),
+            live_transitions: Vec::new(),
             scene_count: 0,
             player_count: 0,
             apply_requested: false,
@@ -68,8 +72,10 @@ impl PreviewState {
         self.graph = None;
         self.animations.clear();
         self.animation_names.clear();
+        self.native_node_names.clear();
         self.live_clips.clear();
         self.live_node_weights.clear();
+        self.live_transitions.clear();
         self.active_animation = 0;
         self.scene_count = 0;
         self.player_count = 0;
@@ -186,8 +192,15 @@ pub fn build_preview_animation_graph(
     state.graph = Some(graphs.add(graph));
     state.animations = animations;
     state.animation_names = animation_names(gltf);
+    state.native_node_names = state
+        .animations
+        .iter()
+        .copied()
+        .zip(state.animation_names.iter().cloned())
+        .collect();
     state.live_clips.clear();
     state.live_node_weights.clear();
+    state.live_transitions.clear();
     state.active_animation = 0;
     state.status = format!("Loaded {} animation(s)", state.animations.len());
 }
@@ -297,8 +310,10 @@ pub fn apply_editor_graph_to_preview(
             state.graph = Some(graph_handle.clone());
             state.animations = compiled.playable_nodes;
             state.animation_names = compiled.playable_names;
+            state.native_node_names = compiled.native_node_names;
             state.live_clips = compiled.live_clips;
             state.live_node_weights = compiled.live_node_weights;
+            state.live_transitions = compiled.live_transitions;
             state.active_animation = 0;
             state.last_applied_signature = signature;
             state.status = format!("Applied editor graph: {}", compiled.summary);
@@ -323,23 +338,34 @@ pub fn apply_editor_graph_to_preview(
 }
 
 pub fn sync_editor_graph_to_preview(
+    time: Res<Time>,
     editor: Res<AnimGraphEditor>,
-    state: Option<Res<PreviewState>>,
+    state: Option<ResMut<PreviewState>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut players: Query<&mut AnimationPlayer>,
 ) {
-    let Some(state) = state else {
+    let Some(mut state) = state else {
         return;
     };
 
-    if state.live_clips.is_empty() && state.live_node_weights.is_empty() {
+    if state.live_clips.is_empty()
+        && state.live_node_weights.is_empty()
+        && state.live_transitions.is_empty()
+    {
         return;
     }
 
     if let Some(graph_handle) = state.graph.as_ref()
         && let Some(graph) = graphs.get_mut(graph_handle)
     {
-        runtime::sync_animation_graph_weights(&editor, graph, &state.live_node_weights);
+        let live_node_weights = state.live_node_weights.clone();
+        runtime::tick_animation_graph(
+            &editor,
+            graph,
+            &live_node_weights,
+            &mut state.live_transitions,
+            time.delta_secs(),
+        );
     }
 
     for mut player in &mut players {

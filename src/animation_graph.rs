@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub type EditorState =
     GraphEditorState<AnimNodeData, AnimDataType, AnimValue, AnimNodeTemplate, AnimGraphUiState>;
 
+pub const MIN_TRANSITION_DURATION: f32 = 0.001;
+
 #[derive(Resource)]
 pub struct AnimGraphEditor {
     pub graph: EditorState,
@@ -102,15 +104,54 @@ impl AnimGraphEditor {
         let saved: SavedAnimGraph = ron::from_str(&ron)?;
         self.graph = saved.graph;
         self.preview_output = saved.preview_output;
+        self.ensure_state_inputs();
         self.clamp_float_values();
         self.last_event = "Graph loaded".to_string();
         Ok(saved.gltf_asset_path)
     }
 
     pub fn clamp_float_values(&mut self) {
-        for (_, input) in self.graph.graph.inputs.iter_mut() {
+        let transition_duration_inputs: Vec<_> = self
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .filter(|(_, node)| matches!(node.user_data.template, AnimNodeTemplate::Transition))
+            .filter_map(|(_, node)| node.get_input("Duration").ok())
+            .collect();
+
+        for (input_id, input) in self.graph.graph.inputs.iter_mut() {
             if let AnimValue::Float(value) = &mut input.value {
-                *value = value.clamp(0.0, 1.0);
+                if transition_duration_inputs.contains(&input_id) {
+                    *value = value.max(MIN_TRANSITION_DURATION);
+                } else {
+                    *value = value.clamp(0.0, 1.0);
+                }
+            }
+        }
+    }
+
+    pub fn ensure_state_inputs(&mut self) {
+        let state_nodes: Vec<_> = self
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .filter(|(_, node)| matches!(node.user_data.template, AnimNodeTemplate::State))
+            .map(|(node_id, _)| node_id)
+            .collect();
+
+        for node_id in state_nodes {
+            if self.graph.graph.nodes[node_id].get_input("Name").is_err() {
+                let label = self.graph.graph.nodes[node_id].label.clone();
+                self.graph.graph.add_input_param(
+                    node_id,
+                    "Name".to_string(),
+                    AnimDataType::Pose,
+                    AnimValue::Text(label),
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
             }
         }
     }
@@ -192,14 +233,21 @@ impl WidgetValueTrait for AnimValue {
         _node_id: NodeId,
         ui: &mut egui::Ui,
         _user_state: &mut Self::UserState,
-        _node_data: &Self::NodeData,
+        node_data: &Self::NodeData,
     ) -> Vec<Self::Response> {
         match self {
             Self::Float(value) => {
                 ui.horizontal(|ui| {
                     ui.label(param_name);
-                    ui.add(egui::DragValue::new(value).speed(0.01).range(0.0..=1.0));
-                    *value = value.clamp(0.0, 1.0);
+                    if matches!(node_data.template, AnimNodeTemplate::Transition)
+                        && param_name == "Duration"
+                    {
+                        ui.add(egui::DragValue::new(value).speed(0.01));
+                        *value = value.max(MIN_TRANSITION_DURATION);
+                    } else {
+                        ui.add(egui::DragValue::new(value).speed(0.01).range(0.0..=1.0));
+                        *value = value.clamp(0.0, 1.0);
+                    }
                 });
             }
             Self::Bool(value) => {
@@ -287,11 +335,17 @@ impl NodeDataTrait for AnimNodeData {
             ));
         }
 
+        if matches!(self.template, AnimNodeTemplate::State) {
+            ui.monospace(format!("State: {}", graph_state_name(graph, node_id)));
+        }
+
         if matches!(self.template, AnimNodeTemplate::Transition) {
             let condition =
                 resolve_graph_bool_input(graph, node_id, "Condition", 0).unwrap_or(false);
             let from = if condition { 0.0 } else { 1.0 };
-            ui.monospace(format!("From: {:.3}  To: {:.3}", from, 1.0 - from));
+            let duration = graph_transition_duration(graph, node_id);
+            ui.monospace(format!("Target From: {:.3}  To: {:.3}", from, 1.0 - from));
+            ui.monospace(format!("Duration: {duration:.3}s"));
         }
 
         if matches!(self.template, AnimNodeTemplate::Output)
@@ -532,6 +586,15 @@ fn graph_weight_input(
         .clamp(0.0, 1.0)
 }
 
+fn graph_transition_duration(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+) -> f32 {
+    resolve_graph_float_input(graph, node, "Duration", 0)
+        .unwrap_or(0.2)
+        .max(MIN_TRANSITION_DURATION)
+}
+
 fn remap_node_value(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     node: NodeId,
@@ -634,6 +697,25 @@ fn graph_node_input_bool(
         AnimValue::Bool(value) => Some(*value),
         _ => None,
     }
+}
+
+fn graph_node_input_text<'a>(
+    graph: &'a Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+    input_name: &str,
+) -> Option<&'a str> {
+    let input = graph.nodes[node].get_input(input_name).ok()?;
+    match graph.get_input(input).value() {
+        AnimValue::Text(value) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn graph_state_name(graph: &Graph<AnimNodeData, AnimDataType, AnimValue>, node: NodeId) -> String {
+    graph_node_input_text(graph, node, "Name")
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| graph.nodes[node].label.clone())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -772,6 +854,14 @@ impl NodeTemplateTrait for AnimNodeTemplate {
             Self::State => {
                 graph.add_input_param(
                     node_id,
+                    "Name".to_string(),
+                    AnimDataType::Pose,
+                    AnimValue::Text("State".to_string()),
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
                     "Pose".to_string(),
                     AnimDataType::Pose,
                     AnimValue::None,
@@ -898,7 +988,7 @@ impl AnimNodeTemplate {
     fn produces_pose(self) -> bool {
         matches!(
             self,
-            Self::Clip | Self::Blend | Self::WeightedBlend | Self::Transition
+            Self::Clip | Self::Blend | Self::WeightedBlend | Self::State | Self::Transition
         )
     }
 
