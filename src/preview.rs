@@ -2,6 +2,7 @@ use std::{fs, io, path::Path, time::Duration};
 
 use bevy::{
     gltf::{Gltf, GltfAssetLabel},
+    input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
     prelude::*,
 };
 use bevy_anim_graph_editor::{
@@ -85,7 +86,26 @@ impl PreviewState {
 }
 
 #[derive(Component)]
-struct PreviewCamera;
+pub struct PreviewCamera;
+
+#[derive(Component)]
+pub struct PreviewCameraRig {
+    target: Vec3,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+}
+
+impl Default for PreviewCameraRig {
+    fn default() -> Self {
+        Self {
+            target: Vec3::new(0.0, 1.0, 0.0),
+            yaw: 0.0,
+            pitch: 0.15,
+            distance: 5.5,
+        }
+    }
+}
 
 #[derive(Component)]
 pub struct PreviewSceneRoot;
@@ -97,10 +117,12 @@ pub fn setup_preview_scene(
 ) {
     commands.insert_resource(PreviewState::empty());
 
+    let camera_rig = PreviewCameraRig::default();
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 1.8, 5.5).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        preview_camera_transform(&camera_rig),
         PreviewCamera,
+        camera_rig,
     ));
 
     commands.spawn((
@@ -129,6 +151,53 @@ pub fn setup_preview_scene(
         },
         Transform::from_xyz(-2.0, 2.5, 2.0),
     ));
+}
+
+pub fn control_preview_camera(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    mouse_motion: Res<AccumulatedMouseMotion>,
+    mouse_scroll: Res<AccumulatedMouseScroll>,
+    mut cameras: Query<(&mut PreviewCameraRig, &mut Transform), With<PreviewCamera>>,
+) {
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    if !shift {
+        return;
+    }
+
+    let Ok((mut rig, mut transform)) = cameras.single_mut() else {
+        return;
+    };
+
+    let motion = mouse_motion.delta;
+    if mouse_buttons.pressed(MouseButton::Left) && motion.length_squared() > 0.0 {
+        rig.yaw -= motion.x * 0.008;
+        rig.pitch = (rig.pitch - motion.y * 0.008).clamp(-1.35, 1.35);
+    }
+
+    if mouse_buttons.pressed(MouseButton::Right) && motion.length_squared() > 0.0 {
+        let right = transform.rotation * Vec3::X;
+        let up = transform.rotation * Vec3::Y;
+        let pan_scale = rig.distance * 0.0015;
+        rig.target += (-right * motion.x + up * motion.y) * pan_scale;
+    }
+
+    if mouse_scroll.delta.y.abs() > f32::EPSILON {
+        let scroll_lines = match mouse_scroll.unit {
+            MouseScrollUnit::Line => mouse_scroll.delta.y,
+            MouseScrollUnit::Pixel => mouse_scroll.delta.y / 32.0,
+        };
+        rig.distance = (rig.distance * (1.0 - scroll_lines * 0.08)).clamp(0.35, 80.0);
+    }
+
+    *transform = preview_camera_transform(&rig);
+}
+
+fn preview_camera_transform(rig: &PreviewCameraRig) -> Transform {
+    let rotation =
+        Quat::from_axis_angle(Vec3::Y, rig.yaw) * Quat::from_axis_angle(Vec3::X, rig.pitch);
+    let offset = rotation * Vec3::new(0.0, 0.0, rig.distance);
+    Transform::from_translation(rig.target + offset).looking_at(rig.target, Vec3::Y)
 }
 
 pub fn reload_preview_scene(

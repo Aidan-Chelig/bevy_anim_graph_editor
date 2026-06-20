@@ -49,6 +49,7 @@ fn main() {
                 preview::attach_preview_animation_graph,
                 preview::apply_editor_graph_to_preview,
                 preview::sync_editor_graph_to_preview,
+                preview::control_preview_camera,
                 preview::cycle_preview_animation,
                 preview::toggle_preview_playback,
             ),
@@ -105,6 +106,9 @@ fn editor_ui(
                 ui.separator();
                 ui.label("Space toggles playback");
                 ui.label("Enter cycles animation");
+                ui.label("Shift + Left Drag orbits preview");
+                ui.label("Shift + Right Drag pans preview");
+                ui.label("Shift + Scroll zooms preview");
             });
 
             ui.separator();
