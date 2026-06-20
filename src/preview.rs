@@ -9,13 +9,12 @@ use bevy_anim_graph_editor::{
     runtime::{self, LiveClipNode, LiveNodeWeight, LiveTransition},
 };
 
-const PREVIEW_ASSET: &str = "character.glb";
 const IMPORT_DIR: &str = "assets/imports";
 
 #[derive(Resource)]
 pub struct PreviewState {
-    pub asset_path: String,
-    pub gltf: Handle<Gltf>,
+    pub asset_path: Option<String>,
+    pub gltf: Option<Handle<Gltf>>,
     pub graph: Option<Handle<AnimationGraph>>,
     pub animations: Vec<AnimationNodeIndex>,
     pub animation_names: Vec<String>,
@@ -34,10 +33,10 @@ pub struct PreviewState {
 }
 
 impl PreviewState {
-    fn new(asset_path: String, gltf: Handle<Gltf>) -> Self {
+    fn empty() -> Self {
         Self {
-            asset_path,
-            gltf,
+            asset_path: None,
+            gltf: None,
             graph: None,
             animations: Vec::new(),
             animation_names: Vec::new(),
@@ -51,7 +50,7 @@ impl PreviewState {
             apply_requested: false,
             auto_apply: true,
             last_applied_signature: None,
-            status: "Loading character.glb".to_string(),
+            status: "No GLB loaded".to_string(),
             reload_scene: false,
         }
     }
@@ -67,8 +66,8 @@ impl PreviewState {
     }
 
     pub fn load_asset_path(&mut self, asset_path: String, asset_server: &AssetServer) {
-        self.asset_path = asset_path.clone();
-        self.gltf = asset_server.load(asset_path.clone());
+        self.asset_path = Some(asset_path.clone());
+        self.gltf = Some(asset_server.load(asset_path.clone()));
         self.graph = None;
         self.animations.clear();
         self.animation_names.clear();
@@ -93,12 +92,10 @@ pub struct PreviewSceneRoot;
 
 pub fn setup_preview_scene(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let gltf = asset_server.load(PREVIEW_ASSET);
-    commands.insert_resource(PreviewState::new(PREVIEW_ASSET.to_string(), gltf));
+    commands.insert_resource(PreviewState::empty());
 
     commands.spawn((
         Camera3d::default(),
@@ -132,12 +129,6 @@ pub fn setup_preview_scene(
         },
         Transform::from_xyz(-2.0, 2.5, 2.0),
     ));
-
-    commands.spawn((
-        SceneRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(PREVIEW_ASSET))),
-        Transform::from_scale(Vec3::splat(1.0)),
-        PreviewSceneRoot,
-    ));
 }
 
 pub fn reload_preview_scene(
@@ -159,7 +150,9 @@ pub fn reload_preview_scene(
         commands.entity(entity).despawn();
     }
 
-    let asset_path = state.asset_path.clone();
+    let Some(asset_path) = state.asset_path.clone() else {
+        return;
+    };
     commands.spawn((
         SceneRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(asset_path))),
         Transform::from_scale(Vec3::splat(1.0)),
@@ -176,14 +169,17 @@ pub fn build_preview_animation_graph(
         return;
     }
 
-    let Some(gltf) = gltfs.get(&state.gltf) else {
+    let Some(gltf_handle) = state.gltf.as_ref() else {
+        return;
+    };
+    let Some(gltf) = gltfs.get(gltf_handle) else {
         return;
     };
 
     state.scene_count = gltf.scenes.len();
 
     if gltf.animations.is_empty() {
-        state.status = "Loaded character.glb with no animations".to_string();
+        state.status = "Loaded GLB with no animations".to_string();
         state.graph = Some(graphs.add(AnimationGraph::new()));
         return;
     }
@@ -299,8 +295,12 @@ pub fn apply_editor_graph_to_preview(
     }
     state.apply_requested = false;
 
-    let Some(gltf) = gltfs.get(&state.gltf) else {
-        state.status = "Cannot apply graph until character.glb is loaded".to_string();
+    let Some(gltf_handle) = state.gltf.as_ref() else {
+        state.status = "Cannot apply graph until a GLB is loaded".to_string();
+        return;
+    };
+    let Some(gltf) = gltfs.get(gltf_handle) else {
+        state.status = "Cannot apply graph until GLB is loaded".to_string();
         return;
     };
 
@@ -392,7 +392,7 @@ pub fn clip_names(gltf: &Gltf) -> Vec<String> {
 }
 
 pub fn loaded_gltf<'a>(state: &PreviewState, gltfs: &'a Assets<Gltf>) -> Option<&'a Gltf> {
-    gltfs.get(&state.gltf)
+    gltfs.get(state.gltf.as_ref()?)
 }
 
 pub fn asset_path_exists(asset_path: &str) -> bool {

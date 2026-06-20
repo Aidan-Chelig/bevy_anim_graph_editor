@@ -1,10 +1,11 @@
-use std::{borrow::Cow, fs, io, path::Path};
+use std::{borrow::Cow, collections::HashMap, fs, io, path::Path};
 
 use bevy::prelude::Resource;
 use bevy_egui::egui::{self, Color32};
 use egui_graph_edit::{
-    DataTypeTrait, Graph, GraphEditorState, InputParamKind, NodeDataTrait, NodeId, NodeResponse,
-    NodeTemplateIter, NodeTemplateTrait, UserResponseTrait, WidgetValueTrait,
+    DataTypeTrait, Graph, GraphEditorState, InputId, InputParamKind, NodeDataTrait, NodeId,
+    NodeResponse, NodeTemplateIter, NodeTemplateTrait, OutputId, UserResponseTrait,
+    WidgetValueTrait,
 };
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +34,7 @@ pub struct SavedAnimGraph {
 impl Default for AnimGraphEditor {
     fn default() -> Self {
         Self {
-            graph: sample_graph(),
+            graph: EditorState::new(1.0),
             ui_state: AnimGraphUiState::default(),
             templates: AnimNodeTemplates,
             preview_output: None,
@@ -174,7 +175,21 @@ pub enum LoadGraphError {
 }
 
 #[derive(Clone, Default)]
-pub struct AnimGraphUiState;
+pub struct AnimGraphUiState {
+    pub edge_visualization: EdgeVisualization,
+    pub weight_header_saturation: bool,
+    pub contribution_borders: bool,
+    pub preview_output: Option<NodeId>,
+    pub flow_phases: HashMap<(InputId, OutputId), f32>,
+    pub flow_last_time: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EdgeVisualization {
+    #[default]
+    Marker,
+    Flow,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AnimGraphResponse {
@@ -360,11 +375,11 @@ impl NodeDataTrait for AnimNodeData {
     fn titlebar_color(
         &self,
         _ui: &egui::Ui,
-        _node_id: NodeId,
-        _graph: &Graph<Self, Self::DataType, Self::ValueType>,
-        _user_state: &mut Self::UserState,
+        node_id: NodeId,
+        graph: &Graph<Self, Self::DataType, Self::ValueType>,
+        user_state: &mut Self::UserState,
     ) -> Option<Color32> {
-        Some(match self.template {
+        let base = match self.template {
             AnimNodeTemplate::Clip => Color32::from_rgb(47, 96, 146),
             AnimNodeTemplate::Blend | AnimNodeTemplate::WeightedBlend => {
                 Color32::from_rgb(61, 126, 93)
@@ -376,8 +391,100 @@ impl NodeDataTrait for AnimNodeData {
             }
             AnimNodeTemplate::Remap => Color32::from_rgb(102, 118, 73),
             AnimNodeTemplate::Output => Color32::from_rgb(140, 68, 84),
+        };
+
+        Some(if user_state.weight_header_saturation {
+            saturate_by_value(base, node_header_value(graph, node_id))
+        } else {
+            base
         })
     }
+
+    fn border_color(
+        &self,
+        _ui: &egui::Ui,
+        node_id: NodeId,
+        graph: &Graph<Self, Self::DataType, Self::ValueType>,
+        user_state: &mut Self::UserState,
+    ) -> Option<Color32> {
+        if !user_state.contribution_borders {
+            return None;
+        }
+
+        let contribution = node_contribution_value(graph, node_id, user_state.preview_output);
+        if contribution <= 0.001 {
+            return None;
+        }
+
+        let alpha = (35.0 + contribution.clamp(0.0, 1.0) * 220.0) as u8;
+        Some(Color32::from_rgba_unmultiplied(126, 236, 255, alpha))
+    }
+}
+
+fn node_header_value(graph: &Graph<AnimNodeData, AnimDataType, AnimValue>, node_id: NodeId) -> f32 {
+    let node = &graph.nodes[node_id];
+    match node.user_data.template {
+        AnimNodeTemplate::Clip
+        | AnimNodeTemplate::Blend
+        | AnimNodeTemplate::WeightedBlend
+        | AnimNodeTemplate::State
+        | AnimNodeTemplate::Transition => pose_node_weights(graph, node_id)
+            .into_iter()
+            .map(|weight| weight.effective_weight)
+            .fold(0.0, f32::max),
+        AnimNodeTemplate::FloatParameter => graph_node_input_float(graph, node_id, "Value")
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0),
+        AnimNodeTemplate::BoolParameter => {
+            if graph_node_input_bool(graph, node_id, "Value").unwrap_or(false) {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        AnimNodeTemplate::Remap => resolve_graph_float_input(graph, node_id, "Value", 0)
+            .and_then(|value| remap_node_value(graph, node_id, value))
+            .unwrap_or(0.0),
+        AnimNodeTemplate::Output => graph
+            .nodes
+            .get(node_id)
+            .and_then(|node| node.get_input("Pose").ok())
+            .and_then(|input| graph.connection(input))
+            .map(|_| 1.0)
+            .unwrap_or(0.0),
+    }
+}
+
+fn node_contribution_value(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node_id: NodeId,
+    preview_output: Option<NodeId>,
+) -> f32 {
+    if matches!(
+        graph.nodes[node_id].user_data.template,
+        AnimNodeTemplate::Output
+    ) {
+        return if preview_output.is_none_or(|output| output == node_id)
+            && output_pose_source(graph, Some(node_id)).is_some()
+        {
+            1.0
+        } else {
+            0.0
+        };
+    }
+
+    pose_node_weights_for_output(graph, node_id, preview_output)
+        .into_iter()
+        .map(|weight| weight.effective_weight)
+        .fold(0.0, f32::max)
+}
+
+fn saturate_by_value(color: Color32, value: f32) -> Color32 {
+    let value = value.clamp(0.0, 1.0);
+    let [r, g, b, a] = color.to_srgba_unmultiplied();
+    let luminance = (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32).round() as u8;
+    let mix = |channel: u8| egui::lerp(luminance as f32..=channel as f32, value).round() as u8;
+    Color32::from_rgba_unmultiplied(mix(r), mix(g), mix(b), a)
 }
 
 #[derive(Clone, Copy)]
@@ -390,22 +497,46 @@ fn pose_node_weights(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     target: NodeId,
 ) -> Vec<PoseNodeWeight> {
-    let mut weights = Vec::new();
-    for (output_node, _) in graph
-        .nodes
-        .iter()
-        .filter(|(_, node)| matches!(node.user_data.template, AnimNodeTemplate::Output))
-    {
-        let Ok(input) = graph.nodes[output_node].get_input("Pose") else {
-            continue;
-        };
-        let Some(output) = graph.connection(input) else {
-            continue;
-        };
+    pose_node_weights_for_output(graph, target, None)
+}
 
+fn pose_node_weights_for_output(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    target: NodeId,
+    preview_output: Option<NodeId>,
+) -> Vec<PoseNodeWeight> {
+    let mut weights = Vec::new();
+    for output in output_pose_sources(graph, preview_output) {
         collect_pose_node_weights(graph, output, target, 1.0, 1.0, &mut weights, 0);
     }
     weights
+}
+
+fn output_pose_sources(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    preview_output: Option<NodeId>,
+) -> Vec<egui_graph_edit::OutputId> {
+    if let Some(output_node) = preview_output {
+        return output_pose_source(graph, Some(output_node))
+            .into_iter()
+            .collect();
+    }
+
+    graph
+        .nodes
+        .iter()
+        .filter(|(_, node)| matches!(node.user_data.template, AnimNodeTemplate::Output))
+        .filter_map(|(output_node, _)| output_pose_source(graph, Some(output_node)))
+        .collect()
+}
+
+fn output_pose_source(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    output_node: Option<NodeId>,
+) -> Option<egui_graph_edit::OutputId> {
+    let output_node = output_node?;
+    let input = graph.nodes[output_node].get_input("Pose").ok()?;
+    graph.connection(input)
 }
 
 fn collect_pose_node_weights(
@@ -567,6 +698,92 @@ fn collect_weighted_pose_input(
         weights,
         depth,
     );
+}
+
+pub fn connection_marker_value(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    input: InputId,
+    output: OutputId,
+) -> Option<f32> {
+    let input_param = graph.get_input(input);
+    match &input_param.typ {
+        AnimDataType::Float => resolve_graph_float_output(graph, output, 0).map(|value| {
+            if value.is_finite() {
+                value.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        }),
+        AnimDataType::Bool => {
+            resolve_graph_bool_output(graph, output, 0).map(|value| if value { 1.0 } else { 0.0 })
+        }
+        AnimDataType::Pose => pose_connection_marker_value(graph, input),
+    }
+}
+
+pub fn connection_contribution_value(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    input: InputId,
+    preview_output: Option<NodeId>,
+) -> f32 {
+    let input_param = graph.get_input(input);
+    let node_contribution =
+        node_contribution_value(graph, input_param.node, preview_output).clamp(0.0, 1.0);
+    if node_contribution <= 0.001 {
+        return 0.0;
+    }
+
+    match input_param.typ {
+        AnimDataType::Pose => pose_connection_marker_value(graph, input)
+            .map(|value| value * node_contribution)
+            .unwrap_or(node_contribution),
+        AnimDataType::Float | AnimDataType::Bool => node_contribution,
+    }
+}
+
+fn pose_connection_marker_value(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    input: InputId,
+) -> Option<f32> {
+    let input_param = graph.get_input(input);
+    let node_id = input_param.node;
+    let input_name = graph.nodes[node_id]
+        .inputs
+        .iter()
+        .find_map(|(name, id)| (*id == input).then_some(name.as_str()))?;
+
+    match graph.nodes[node_id].user_data.template {
+        AnimNodeTemplate::Blend => match input_name {
+            "A" => Some(1.0 - graph_blend_weight(graph, node_id)),
+            "B" => Some(graph_blend_weight(graph, node_id)),
+            _ => None,
+        },
+        AnimNodeTemplate::WeightedBlend => {
+            let a = graph_weight_input(graph, node_id, "A Weight", 1.0);
+            let b = graph_weight_input(graph, node_id, "B Weight", 1.0);
+            let sum = a + b;
+            if sum <= f32::EPSILON {
+                return Some(0.0);
+            }
+
+            match input_name {
+                "A" => Some(a / sum),
+                "B" => Some(b / sum),
+                _ => None,
+            }
+        }
+        AnimNodeTemplate::Transition => {
+            let condition =
+                resolve_graph_bool_input(graph, node_id, "Condition", 0).unwrap_or(false);
+            match input_name {
+                "From" => Some(if condition { 0.0 } else { 1.0 }),
+                "To" => Some(if condition { 1.0 } else { 0.0 }),
+                _ => None,
+            }
+        }
+        AnimNodeTemplate::Output => (input_name == "Pose").then_some(1.0),
+        _ => None,
+    }
 }
 
 fn graph_blend_weight(graph: &Graph<AnimNodeData, AnimDataType, AnimValue>, node: NodeId) -> f32 {
@@ -1040,112 +1257,4 @@ impl NodeTemplateIter for AnimNodeTemplates {
             AnimNodeTemplate::Output,
         ]
     }
-}
-
-fn sample_graph() -> EditorState {
-    let mut editor = EditorState::new(1.0);
-    let mut user_state = AnimGraphUiState;
-
-    let idle = add_node(
-        &mut editor,
-        &mut user_state,
-        AnimNodeTemplate::Clip,
-        "Idle Clip",
-        egui::pos2(80.0, 100.0),
-    );
-    set_node_input_value(
-        &mut editor,
-        idle,
-        "Clip",
-        AnimValue::Text("Animation 0".to_string()),
-    );
-    let walk = add_node(
-        &mut editor,
-        &mut user_state,
-        AnimNodeTemplate::Clip,
-        "Walk Clip",
-        egui::pos2(80.0, 320.0),
-    );
-    set_node_input_value(
-        &mut editor,
-        walk,
-        "Clip",
-        AnimValue::Text("Animation 1".to_string()),
-    );
-    let speed = add_node(
-        &mut editor,
-        &mut user_state,
-        AnimNodeTemplate::FloatParameter,
-        "Speed",
-        egui::pos2(90.0, 560.0),
-    );
-    let blend = add_node(
-        &mut editor,
-        &mut user_state,
-        AnimNodeTemplate::Blend,
-        "Locomotion Blend",
-        egui::pos2(420.0, 220.0),
-    );
-    let output = add_node(
-        &mut editor,
-        &mut user_state,
-        AnimNodeTemplate::Output,
-        "Preview Output",
-        egui::pos2(760.0, 300.0),
-    );
-
-    connect(&mut editor, idle, "Pose", blend, "A");
-    connect(&mut editor, walk, "Pose", blend, "B");
-    connect(&mut editor, speed, "Value", blend, "Weight");
-    connect(&mut editor, blend, "Pose", output, "Pose");
-
-    editor
-}
-
-fn add_node(
-    editor: &mut EditorState,
-    user_state: &mut AnimGraphUiState,
-    template: AnimNodeTemplate,
-    label: &str,
-    position: egui::Pos2,
-) -> NodeId {
-    let node = editor.graph.add_node(
-        label.to_string(),
-        template.user_data(user_state),
-        |graph, node_id| template.build_node(graph, user_state, node_id),
-    );
-    editor.node_positions.insert(node, position);
-    editor
-        .node_orientations
-        .insert(node, egui_graph_edit::NodeOrientation::LeftToRight);
-    editor.node_order.push(node);
-    node
-}
-
-fn connect(
-    editor: &mut EditorState,
-    output_node: NodeId,
-    output: &str,
-    input_node: NodeId,
-    input: &str,
-) {
-    let output = editor.graph.nodes[output_node]
-        .get_output(output)
-        .expect("sample output should exist");
-    let input = editor.graph.nodes[input_node]
-        .get_input(input)
-        .expect("sample input should exist");
-    editor.graph.add_connection(output, input);
-}
-
-fn set_node_input_value(
-    editor: &mut EditorState,
-    node: NodeId,
-    input_name: &str,
-    value: AnimValue,
-) {
-    let input = editor.graph.nodes[node]
-        .get_input(input_name)
-        .expect("sample input should exist");
-    editor.graph.inputs[input].value = value;
 }
