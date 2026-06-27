@@ -4,6 +4,12 @@ A native Bevy tool for creating, previewing, saving, loading, and exporting anim
 
 This is currently an editor/runtime prototype. The goal is to make Bevy animation graph authoring easier to inspect visually, while also exporting enough graph data for native Bevy apps or a lightweight runtime library.
 
+## Preview
+
+<video src="README/preview.mp4" controls muted loop></video>
+
+[Open the preview video](README/preview.mp4)
+
 ## Features
 
 - Node editor for pose, state, transition, one-shot, parameter, and math nodes.
