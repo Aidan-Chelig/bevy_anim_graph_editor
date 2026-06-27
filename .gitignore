@@ -2,3 +2,5 @@
 *.log
 **/.cargo-ok
 **/.cargo_vcs_info.json
+/crates/egui-graph-edit/target
+/assets
