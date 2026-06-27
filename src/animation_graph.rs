@@ -8,11 +8,23 @@ use std::{
 use bevy::prelude::Resource;
 use bevy_egui::egui::{self, Color32};
 use egui_graph_edit::{
-    DataTypeTrait, Graph, GraphEditorState, InputId, InputParamKind, NodeDataTrait, NodeId,
-    NodeResponse, NodeTemplateIter, NodeTemplateTrait, OutputId, UserResponseTrait,
+    AnyParameterId, DataTypeTrait, Graph, GraphEditorState, InputId, InputParamKind, NodeDataTrait,
+    NodeId, NodeResponse, NodeTemplateIter, NodeTemplateTrait, OutputId, UserResponseTrait,
     WidgetValueTrait,
 };
 use serde::{Deserialize, Serialize};
+
+mod one_shot;
+
+use one_shot::{
+    is_one_shot_fade_input, is_one_shot_playback_input, is_one_shot_start_offset_input,
+    one_shot_action_lane, one_shot_start_offset_lane, one_shot_trigger_lane,
+};
+pub use one_shot::{
+    one_shot_action_input_name, one_shot_fade_in_input_name, one_shot_fade_out_input_name,
+    one_shot_lane_count, one_shot_lanes, one_shot_playback_input_name,
+    one_shot_start_offset_input_name, one_shot_trigger_input_name,
+};
 
 pub type EditorState =
     GraphEditorState<AnimNodeData, AnimDataType, AnimValue, AnimNodeTemplate, AnimGraphUiState>;
@@ -177,6 +189,87 @@ impl Default for AnimGraphEditor {
 }
 
 impl AnimGraphEditor {
+    pub fn sanitize_after_graph_change(&mut self) {
+        // egui-graph-edit owns graph mutation, while the app keeps preview/UI caches keyed by
+        // graph ids. Keep those caches conservative after delete/load/lane edits so stale ids do
+        // not survive into drawing or runtime compilation.
+        self.graph
+            .selected_nodes
+            .retain(|node_id| self.graph.graph.nodes.get(*node_id).is_some());
+        self.graph
+            .node_order
+            .retain(|node_id| self.graph.graph.nodes.get(*node_id).is_some());
+
+        if !self
+            .preview_output
+            .is_some_and(|node_id| self.is_output_node(node_id))
+        {
+            self.preview_output = self.first_output_node();
+        }
+        self.ui_state.preview_output = self.preview_output;
+
+        if self
+            .ui_state
+            .clip_picker
+            .as_ref()
+            .is_some_and(|picker| !self.is_clip_node(picker.node))
+        {
+            self.ui_state.clip_picker = None;
+        }
+
+        self.ui_state
+            .live_one_shot_progress
+            .retain(|(node_id, _), _| self.graph.graph.nodes.get(*node_id).is_some());
+        self.ui_state
+            .one_shot_action_clip_labels
+            .retain(|(node_id, _), _| self.graph.graph.nodes.get(*node_id).is_some());
+        self.ui_state.flow_phases.retain(|(input, output), _| {
+            self.graph.graph.inputs.get(*input).is_some()
+                && self.graph.graph.outputs.get(*output).is_some()
+                && self.graph.graph.connection(*input) == Some(*output)
+        });
+
+        if self
+            .graph
+            .connection_in_progress
+            .is_some_and(|(node_id, parameter)| {
+                self.graph.graph.nodes.get(node_id).is_none()
+                    || match parameter {
+                        AnyParameterId::Input(input) => {
+                            self.graph.graph.inputs.get(input).is_none()
+                        }
+                        AnyParameterId::Output(output) => {
+                            self.graph.graph.outputs.get(output).is_none()
+                        }
+                    }
+            })
+        {
+            self.graph.connection_in_progress = None;
+        }
+    }
+
+    pub fn first_output_node(&self) -> Option<NodeId> {
+        self.graph.graph.nodes.iter().find_map(|(id, node)| {
+            matches!(node.user_data.template, AnimNodeTemplate::Output).then_some(id)
+        })
+    }
+
+    pub fn is_output_node(&self, node_id: NodeId) -> bool {
+        self.graph
+            .graph
+            .nodes
+            .get(node_id)
+            .is_some_and(|node| matches!(node.user_data.template, AnimNodeTemplate::Output))
+    }
+
+    fn is_clip_node(&self, node_id: NodeId) -> bool {
+        self.graph
+            .graph
+            .nodes
+            .get(node_id)
+            .is_some_and(|node| matches!(node.user_data.template, AnimNodeTemplate::Clip))
+    }
+
     pub fn selected_clip_node(&self) -> Option<NodeId> {
         self.graph.selected_nodes.first().copied().filter(|node| {
             self.graph
@@ -555,6 +648,7 @@ impl AnimGraphEditor {
         self.ensure_state_inputs();
         self.ensure_playback_inputs();
         self.clamp_float_values();
+        self.sanitize_after_graph_change();
         self.last_event = "Graph loaded".to_string();
         Ok(saved.gltf_asset_path)
     }
@@ -573,12 +667,31 @@ impl AnimGraphEditor {
             .graph
             .nodes
             .iter()
-            .filter_map(|(_, node)| node.get_input("Start Offset").ok())
+            .flat_map(|(_, node)| {
+                node.inputs.iter().filter_map(|(name, input)| {
+                    (name == "Start Offset" || is_one_shot_start_offset_input(name))
+                        .then_some(*input)
+                })
+            })
+            .collect();
+        let fade_duration_inputs: Vec<_> = self
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .filter(|(_, node)| matches!(node.user_data.template, AnimNodeTemplate::OneShot))
+            .flat_map(|(_, node)| {
+                node.inputs
+                    .iter()
+                    .filter_map(|(name, input)| is_one_shot_fade_input(name).then_some(*input))
+            })
             .collect();
 
         for (input_id, input) in self.graph.graph.inputs.iter_mut() {
             if let AnimValue::Float(value) = &mut input.value {
-                if transition_duration_inputs.contains(&input_id) {
+                if transition_duration_inputs.contains(&input_id)
+                    || fade_duration_inputs.contains(&input_id)
+                {
                     *value = value.max(MIN_TRANSITION_DURATION);
                 } else if start_offset_inputs.contains(&input_id) {
                     *value = value.max(0.0);
@@ -625,9 +738,25 @@ impl AnimGraphEditor {
 
         for (node_id, template) in nodes {
             match template {
-                AnimNodeTemplate::Clip | AnimNodeTemplate::OneShot => {
+                AnimNodeTemplate::Clip => {
                     self.ensure_text_input(node_id, "Playback", "Loop");
                     self.ensure_float_input(node_id, "Start Offset", 0.0);
+                }
+                AnimNodeTemplate::OneShot => {
+                    for lane in one_shot_lanes(&self.graph.graph, node_id) {
+                        self.ensure_float_input(node_id, &one_shot_fade_in_input_name(lane), 0.08);
+                        self.ensure_float_input(node_id, &one_shot_fade_out_input_name(lane), 0.12);
+                        self.ensure_text_input(
+                            node_id,
+                            &one_shot_playback_input_name(lane),
+                            "OnceHold",
+                        );
+                        self.ensure_float_input(
+                            node_id,
+                            &one_shot_start_offset_input_name(lane),
+                            0.0,
+                        );
+                    }
                 }
                 AnimNodeTemplate::State => {
                     self.ensure_text_input(node_id, "Playback", "Loop");
@@ -640,6 +769,136 @@ impl AnimGraphEditor {
                 _ => {}
             }
         }
+    }
+
+    pub fn add_one_shot_lane(&mut self, node_id: NodeId) -> bool {
+        let Some(node) = self.graph.graph.nodes.get(node_id) else {
+            return false;
+        };
+        if !matches!(node.user_data.template, AnimNodeTemplate::OneShot) {
+            return false;
+        }
+
+        let lane = one_shot_lane_count(&self.graph.graph, node_id) + 1;
+        self.graph.graph.add_input_param(
+            node_id,
+            one_shot_action_input_name(lane),
+            AnimDataType::Pose,
+            AnimValue::None,
+            InputParamKind::ConnectionOnly,
+            true,
+        );
+        self.graph.graph.add_input_param(
+            node_id,
+            one_shot_trigger_input_name(lane),
+            AnimDataType::Bool,
+            AnimValue::Bool(false),
+            InputParamKind::ConnectionOrConstant,
+            true,
+        );
+        self.graph.graph.add_input_param(
+            node_id,
+            one_shot_fade_in_input_name(lane),
+            AnimDataType::Float,
+            AnimValue::Float(0.08),
+            InputParamKind::ConnectionOrConstant,
+            true,
+        );
+        self.graph.graph.add_input_param(
+            node_id,
+            one_shot_fade_out_input_name(lane),
+            AnimDataType::Float,
+            AnimValue::Float(0.12),
+            InputParamKind::ConnectionOrConstant,
+            true,
+        );
+        self.graph.graph.add_input_param(
+            node_id,
+            one_shot_playback_input_name(lane),
+            AnimDataType::Text,
+            AnimValue::Text("OnceHold".to_string()),
+            InputParamKind::ConstantOnly,
+            true,
+        );
+        self.graph.graph.add_input_param(
+            node_id,
+            one_shot_start_offset_input_name(lane),
+            AnimDataType::Float,
+            AnimValue::Float(0.0),
+            InputParamKind::ConstantOnly,
+            true,
+        );
+        true
+    }
+
+    pub fn remove_one_shot_lane(&mut self, node_id: NodeId) -> bool {
+        let Some(node) = self.graph.graph.nodes.get(node_id) else {
+            return false;
+        };
+        if !matches!(node.user_data.template, AnimNodeTemplate::OneShot) {
+            return false;
+        }
+
+        let lane = one_shot_lane_count(&self.graph.graph, node_id);
+        if lane <= 1 {
+            return false;
+        }
+
+        let action = self.graph.graph.nodes[node_id]
+            .get_input(&one_shot_action_input_name(lane))
+            .ok();
+        let trigger = self.graph.graph.nodes[node_id]
+            .get_input(&one_shot_trigger_input_name(lane))
+            .ok();
+        let fade_in = self.graph.graph.nodes[node_id]
+            .get_input(&one_shot_fade_in_input_name(lane))
+            .ok();
+        let fade_out = self.graph.graph.nodes[node_id]
+            .get_input(&one_shot_fade_out_input_name(lane))
+            .ok();
+        let playback = self.graph.graph.nodes[node_id]
+            .get_input(&one_shot_playback_input_name(lane))
+            .ok();
+        let start_offset = self.graph.graph.nodes[node_id]
+            .get_input(&one_shot_start_offset_input_name(lane))
+            .ok();
+        for input in [action, trigger, fade_in, fade_out, playback, start_offset]
+            .into_iter()
+            .flatten()
+        {
+            self.graph.graph.remove_input_param(input);
+        }
+        true
+    }
+
+    pub fn one_shot_action_clip_labels(&self) -> HashMap<(NodeId, usize), String> {
+        let mut labels = HashMap::new();
+        for (node_id, node) in self.graph.graph.nodes.iter() {
+            if !matches!(node.user_data.template, AnimNodeTemplate::OneShot) {
+                continue;
+            }
+
+            for lane in one_shot_lanes(&self.graph.graph, node_id) {
+                let Ok(input) = node.get_input(&one_shot_action_input_name(lane)) else {
+                    continue;
+                };
+                let Some(output) = self.graph.graph.connection(input) else {
+                    continue;
+                };
+                let source = self.graph.graph.get_output(output).node;
+                let Some(source_node) = self.graph.graph.nodes.get(source) else {
+                    continue;
+                };
+                if !matches!(source_node.user_data.template, AnimNodeTemplate::Clip) {
+                    continue;
+                }
+                let Some(label) = self.clip_node_label(source) else {
+                    continue;
+                };
+                labels.insert((node_id, lane), display_clip_name(label).to_string());
+            }
+        }
+        labels
     }
 
     fn ensure_text_input(&mut self, node_id: NodeId, name: &str, value: &str) {
@@ -693,7 +952,8 @@ pub struct AnimGraphUiState {
     pub weight_header_saturation: bool,
     pub contribution_borders: bool,
     pub preview_output: Option<NodeId>,
-    pub live_one_shot_progress: HashMap<NodeId, f32>,
+    pub live_one_shot_progress: HashMap<(NodeId, usize), f32>,
+    pub one_shot_action_clip_labels: HashMap<(NodeId, usize), String>,
     pub available_clips: Vec<String>,
     pub clip_picker: Option<ClipPickerState>,
     pub flow_phases: HashMap<(InputId, OutputId), f32>,
@@ -718,6 +978,8 @@ pub enum EdgeVisualization {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AnimGraphResponse {
     SetOutput(NodeId),
+    AddOneShotLane(NodeId),
+    RemoveOneShotLane(NodeId),
 }
 
 impl UserResponseTrait for AnimGraphResponse {}
@@ -781,12 +1043,17 @@ impl WidgetValueTrait for AnimValue {
             Self::Float(value) => {
                 ui.horizontal(|ui| {
                     ui.label(param_name);
-                    if matches!(node_data.template, AnimNodeTemplate::Transition)
-                        && param_name == "Duration"
+                    if (matches!(node_data.template, AnimNodeTemplate::Transition)
+                        && param_name == "Duration")
+                        || (matches!(node_data.template, AnimNodeTemplate::OneShot)
+                            && is_one_shot_fade_input(param_name))
                     {
                         ui.add(egui::DragValue::new(value).speed(0.01));
                         *value = value.max(MIN_TRANSITION_DURATION);
-                    } else if param_name == "Start Offset" {
+                    } else if param_name == "Start Offset"
+                        || (matches!(node_data.template, AnimNodeTemplate::OneShot)
+                            && is_one_shot_start_offset_input(param_name))
+                    {
                         ui.add(egui::DragValue::new(value).speed(0.01));
                         *value = value.max(0.0);
                     } else {
@@ -818,7 +1085,9 @@ impl WidgetValueTrait for AnimValue {
                 } else if matches!(
                     node_data.template,
                     AnimNodeTemplate::Clip | AnimNodeTemplate::OneShot | AnimNodeTemplate::State
-                ) && param_name == "Playback"
+                ) && (param_name == "Playback"
+                    || (matches!(node_data.template, AnimNodeTemplate::OneShot)
+                        && is_one_shot_playback_input(param_name)))
                 {
                     combo_text(
                         ui,
@@ -855,6 +1124,26 @@ impl WidgetValueTrait for AnimValue {
             Self::None => {
                 ui.label(param_name);
             }
+        }
+
+        Vec::new()
+    }
+
+    fn value_widget_connected(
+        &mut self,
+        param_name: &str,
+        node_id: NodeId,
+        ui: &mut egui::Ui,
+        user_state: &mut Self::UserState,
+        node_data: &Self::NodeData,
+    ) -> Vec<Self::Response> {
+        if matches!(node_data.template, AnimNodeTemplate::OneShot)
+            && let Some(lane) = one_shot_action_lane(param_name)
+            && let Some(clip_name) = user_state.one_shot_action_clip_labels.get(&(node_id, lane))
+        {
+            ui.label(format!("{param_name}: {clip_name}"));
+        } else {
+            ui.label(param_name);
         }
 
         Vec::new()
@@ -1131,6 +1420,23 @@ impl NodeDataTrait for AnimNodeData {
             ));
         }
 
+        if matches!(self.template, AnimNodeTemplate::OneShot) {
+            let lanes = one_shot_lane_count(graph, node_id);
+            ui.horizontal(|ui| {
+                ui.monospace(format!("Lanes: {lanes}"));
+                if ui.small_button("+").clicked() {
+                    responses.push(NodeResponse::User(AnimGraphResponse::AddOneShotLane(
+                        node_id,
+                    )));
+                }
+                if ui.add_enabled(lanes > 1, egui::Button::new("-")).clicked() {
+                    responses.push(NodeResponse::User(AnimGraphResponse::RemoveOneShotLane(
+                        node_id,
+                    )));
+                }
+            });
+        }
+
         if matches!(self.template, AnimNodeTemplate::State) {
             ui.monospace(format!("State: {}", graph_state_name(graph, node_id)));
         }
@@ -1151,6 +1457,36 @@ impl NodeDataTrait for AnimNodeData {
         }
 
         responses
+    }
+
+    fn separator(
+        &self,
+        ui: &mut egui::Ui,
+        node_id: NodeId,
+        param_id: AnyParameterId,
+        graph: &Graph<Self, Self::DataType, Self::ValueType>,
+        _user_state: &mut Self::UserState,
+    ) {
+        if !matches!(self.template, AnimNodeTemplate::OneShot) {
+            return;
+        }
+
+        let AnyParameterId::Input(input) = param_id else {
+            return;
+        };
+        let Some(input_name) = graph.nodes.get(node_id).and_then(|node| {
+            node.inputs
+                .iter()
+                .find_map(|(name, id)| (*id == input).then_some(name.as_str()))
+        }) else {
+            return;
+        };
+
+        if one_shot_trigger_lane(input_name).is_some()
+            || one_shot_start_offset_lane(input_name).is_some()
+        {
+            ui.separator();
+        }
     }
 
     fn titlebar_color(
@@ -1277,7 +1613,7 @@ fn node_contribution_value(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     node_id: NodeId,
     preview_output: Option<NodeId>,
-    live_one_shot_progress: &HashMap<NodeId, f32>,
+    live_one_shot_progress: &HashMap<(NodeId, usize), f32>,
 ) -> f32 {
     if matches!(
         graph.nodes[node_id].user_data.template,
@@ -1315,7 +1651,7 @@ struct PoseNodeWeight {
 fn pose_node_weights(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     target: NodeId,
-    live_one_shot_progress: &HashMap<NodeId, f32>,
+    live_one_shot_progress: &HashMap<(NodeId, usize), f32>,
 ) -> Vec<PoseNodeWeight> {
     pose_node_weights_for_output(graph, target, None, live_one_shot_progress)
 }
@@ -1324,7 +1660,7 @@ fn pose_node_weights_for_output(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     target: NodeId,
     preview_output: Option<NodeId>,
-    live_one_shot_progress: &HashMap<NodeId, f32>,
+    live_one_shot_progress: &HashMap<(NodeId, usize), f32>,
 ) -> Vec<PoseNodeWeight> {
     let mut weights = Vec::new();
     for output in output_pose_sources(graph, preview_output) {
@@ -1346,7 +1682,12 @@ fn output_pose_sources(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     preview_output: Option<NodeId>,
 ) -> Vec<egui_graph_edit::OutputId> {
-    if let Some(output_node) = preview_output {
+    if let Some(output_node) = preview_output.filter(|output_node| {
+        graph
+            .nodes
+            .get(*output_node)
+            .is_some_and(|node| matches!(node.user_data.template, AnimNodeTemplate::Output))
+    }) {
         return output_pose_source(graph, Some(output_node))
             .into_iter()
             .collect();
@@ -1365,7 +1706,7 @@ fn output_pose_source(
     output_node: Option<NodeId>,
 ) -> Option<egui_graph_edit::OutputId> {
     let output_node = output_node?;
-    let input = graph.nodes[output_node].get_input("Pose").ok()?;
+    let input = graph.nodes.get(output_node)?.get_input("Pose").ok()?;
     graph.connection(input)
 }
 
@@ -1376,15 +1717,20 @@ fn collect_pose_node_weights(
     node_weight: f32,
     effective_weight: f32,
     weights: &mut Vec<PoseNodeWeight>,
-    live_one_shot_progress: &HashMap<NodeId, f32>,
+    live_one_shot_progress: &HashMap<(NodeId, usize), f32>,
     depth: usize,
 ) {
     if depth > 64 {
         return;
     }
 
-    let node_id = graph.get_output(output).node;
-    let node = &graph.nodes[node_id];
+    let Some(output_param) = graph.try_get_output(output) else {
+        return;
+    };
+    let node_id = output_param.node;
+    let Some(node) = graph.nodes.get(node_id) else {
+        return;
+    };
     if node_id == target {
         weights.push(PoseNodeWeight {
             node_weight,
@@ -1461,7 +1807,7 @@ fn collect_pose_node_weights(
             );
         }
         AnimNodeTemplate::OneShot => {
-            let action = one_shot_visual_progress(graph, node_id, live_one_shot_progress);
+            let action = one_shot_visual_max_progress(graph, node_id, live_one_shot_progress);
             collect_weighted_pose_input(
                 graph,
                 node_id,
@@ -1474,18 +1820,22 @@ fn collect_pose_node_weights(
                 live_one_shot_progress,
                 depth + 1,
             );
-            collect_weighted_pose_input(
-                graph,
-                node_id,
-                "Action",
-                action,
-                action,
-                effective_weight,
-                target,
-                weights,
-                live_one_shot_progress,
-                depth + 1,
-            );
+            for lane in one_shot_lanes(graph, node_id) {
+                let lane_action =
+                    one_shot_visual_progress(graph, node_id, lane, live_one_shot_progress);
+                collect_weighted_pose_input(
+                    graph,
+                    node_id,
+                    &one_shot_action_input_name(lane),
+                    lane_action,
+                    lane_action,
+                    effective_weight,
+                    target,
+                    weights,
+                    live_one_shot_progress,
+                    depth + 1,
+                );
+            }
         }
         AnimNodeTemplate::State => {
             collect_weighted_pose_input(
@@ -1553,7 +1903,7 @@ fn collect_weighted_pose_input(
     parent_effective_weight: f32,
     target: NodeId,
     weights: &mut Vec<PoseNodeWeight>,
-    live_one_shot_progress: &HashMap<NodeId, f32>,
+    live_one_shot_progress: &HashMap<(NodeId, usize), f32>,
     depth: usize,
 ) {
     let Ok(input) = graph.nodes[node].get_input(input_name) else {
@@ -1578,7 +1928,7 @@ pub fn connection_marker_value(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     input: InputId,
     output: OutputId,
-    live_one_shot_progress: &HashMap<NodeId, f32>,
+    live_one_shot_progress: &HashMap<(NodeId, usize), f32>,
 ) -> Option<f32> {
     let input_param = graph.get_input(input);
     match &input_param.typ {
@@ -1601,7 +1951,7 @@ pub fn connection_contribution_value(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     input: InputId,
     preview_output: Option<NodeId>,
-    live_one_shot_progress: &HashMap<NodeId, f32>,
+    live_one_shot_progress: &HashMap<(NodeId, usize), f32>,
 ) -> f32 {
     let input_param = graph.get_input(input);
     let node_contribution = node_contribution_value(
@@ -1626,7 +1976,7 @@ pub fn connection_contribution_value(
 fn pose_connection_marker_value(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     input: InputId,
-    live_one_shot_progress: &HashMap<NodeId, f32>,
+    live_one_shot_progress: &HashMap<(NodeId, usize), f32>,
 ) -> Option<f32> {
     let input_param = graph.get_input(input);
     let node_id = input_param.node;
@@ -1642,11 +1992,12 @@ fn pose_connection_marker_value(
             _ => None,
         },
         AnimNodeTemplate::OneShot => {
-            let action = one_shot_visual_progress(graph, node_id, live_one_shot_progress);
+            let action = one_shot_visual_max_progress(graph, node_id, live_one_shot_progress);
             match input_name {
                 "Base" => Some(1.0 - action),
-                "Action" => Some(action),
-                _ => None,
+                _ => one_shot_action_lane(input_name).map(|lane| {
+                    one_shot_visual_progress(graph, node_id, lane, live_one_shot_progress)
+                }),
             }
         }
         AnimNodeTemplate::WeightedBlend => {
@@ -1680,19 +2031,33 @@ fn pose_connection_marker_value(
 fn one_shot_visual_progress(
     graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
     node: NodeId,
-    live_one_shot_progress: &HashMap<NodeId, f32>,
+    lane: usize,
+    live_one_shot_progress: &HashMap<(NodeId, usize), f32>,
 ) -> f32 {
     live_one_shot_progress
-        .get(&node)
+        .get(&(node, lane))
         .copied()
         .unwrap_or_else(|| {
-            if resolve_graph_bool_input(graph, node, "Trigger", 0).unwrap_or(false) {
+            if resolve_graph_bool_input(graph, node, &one_shot_trigger_input_name(lane), 0)
+                .unwrap_or(false)
+            {
                 1.0
             } else {
                 0.0
             }
         })
         .clamp(0.0, 1.0)
+}
+
+fn one_shot_visual_max_progress(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+    live_one_shot_progress: &HashMap<(NodeId, usize), f32>,
+) -> f32 {
+    one_shot_lanes(graph, node)
+        .into_iter()
+        .map(|lane| one_shot_visual_progress(graph, node, lane, live_one_shot_progress))
+        .fold(0.0, f32::max)
 }
 
 fn graph_blend_weight(graph: &Graph<AnimNodeData, AnimDataType, AnimValue>, node: NodeId) -> f32 {

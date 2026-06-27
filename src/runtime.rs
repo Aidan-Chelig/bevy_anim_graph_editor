@@ -8,7 +8,9 @@ use bevy::{
 
 use crate::animation_graph::{
     AnimGraphEditor, AnimNodeTemplate, AnimValue, CompletionAction, MIN_TRANSITION_DURATION,
-    PlaybackMode, SavedAnimGraph,
+    PlaybackMode, PlaybackSettings, SavedAnimGraph, one_shot_action_input_name,
+    one_shot_fade_in_input_name, one_shot_fade_out_input_name, one_shot_lanes,
+    one_shot_playback_input_name, one_shot_start_offset_input_name, one_shot_trigger_input_name,
 };
 
 pub struct AnimGraphRuntimePlugin;
@@ -151,7 +153,12 @@ impl AnimGraphRuntime {
                 }
             }
             for one_shot in &mut self.live_one_shots {
-                if one_shot_condition_uses_trigger(&self.editor, one_shot.editor_node, name) {
+                if one_shot_condition_uses_trigger(
+                    &self.editor,
+                    one_shot.editor_node,
+                    one_shot.lane,
+                    name,
+                ) {
                     one_shot.progress = 0.0;
                     one_shot.target = 1.0;
                     one_shot.restart_requested = true;
@@ -167,6 +174,7 @@ pub struct LiveClipNode {
     pub editor_node: egui_graph_edit::NodeId,
     pub playback_node: egui_graph_edit::NodeId,
     pub playback_animation: AnimationNodeIndex,
+    pub one_shot_lane: Option<usize>,
     pub animation: AnimationNodeIndex,
 }
 
@@ -176,9 +184,7 @@ pub fn apply_clip_playback(
     active_animation: &mut ActiveAnimation,
     clip_duration: f32,
 ) {
-    let settings = editor
-        .playback_settings(live_clip.playback_node)
-        .unwrap_or_default();
+    let settings = live_clip_playback_settings(editor, live_clip);
     let speed = clip_speed(editor, live_clip.editor_node) * settings.speed.max(0.0);
     let clip_duration = clip_duration.max(0.0);
 
@@ -335,6 +341,7 @@ pub struct LiveTransition {
 #[derive(Clone, Copy)]
 pub struct LiveOneShot {
     pub editor_node: egui_graph_edit::NodeId,
+    pub lane: usize,
     pub progress: f32,
     pub target: f32,
     pub restart_requested: bool,
@@ -349,7 +356,7 @@ pub enum WeightDriver {
     TransitionFrom(egui_graph_edit::NodeId),
     TransitionTo(egui_graph_edit::NodeId),
     OneShotBase(egui_graph_edit::NodeId),
-    OneShotAction(egui_graph_edit::NodeId),
+    OneShotAction(egui_graph_edit::NodeId, usize),
 }
 
 impl WeightDriver {
@@ -366,8 +373,8 @@ impl WeightDriver {
             Self::WeightedBlendB(node) => graph_weight_input(editor, node, "B Weight", 1.0),
             Self::TransitionFrom(node) => 1.0 - transition_progress(editor, transitions, node),
             Self::TransitionTo(node) => transition_progress(editor, transitions, node),
-            Self::OneShotBase(node) => 1.0 - one_shot_progress(editor, one_shots, node),
-            Self::OneShotAction(node) => one_shot_progress(editor, one_shots, node),
+            Self::OneShotBase(node) => 1.0 - one_shot_max_progress(editor, one_shots, node),
+            Self::OneShotAction(node, lane) => one_shot_progress(editor, one_shots, node, lane),
         }
     }
 }
@@ -524,7 +531,7 @@ pub fn sync_runtime_graphs(
             };
 
             if runtime.live_one_shots.iter().any(|one_shot| {
-                one_shot.restart_requested && live_clip.playback_node == one_shot.editor_node
+                live_clip_matches_one_shot(*live_clip, *one_shot) && one_shot.restart_requested
             }) {
                 active_animation.replay();
                 active_animation.resume();
@@ -612,6 +619,7 @@ pub fn compile_editor_graph(
         None,
         None,
         None,
+        None,
     )?;
 
     let summary = if playable_names.is_empty() {
@@ -684,7 +692,7 @@ pub fn prime_triggered_transitions(
 
 pub fn prime_triggered_one_shots(editor: &AnimGraphEditor, live_one_shots: &mut [LiveOneShot]) {
     for one_shot in live_one_shots {
-        if one_shot_target(editor, one_shot.editor_node) >= 1.0 {
+        if one_shot_target(editor, one_shot.editor_node, one_shot.lane) >= 1.0 {
             one_shot.progress = 0.0;
             one_shot.target = 1.0;
             one_shot.restart_requested = true;
@@ -738,7 +746,7 @@ pub fn update_one_shot_completion_targets(
 
         let mut action_clips = live_clips
             .iter()
-            .filter(|live_clip| live_clip.playback_node == one_shot.editor_node)
+            .filter(|live_clip| live_clip_matches_one_shot(**live_clip, *one_shot))
             .peekable();
         if action_clips.peek().is_none() {
             continue;
@@ -773,6 +781,11 @@ fn one_shot_clip_completed(
     } else {
         animation.elapsed() > 0.001
     }
+}
+
+pub fn live_clip_matches_one_shot(live_clip: LiveClipNode, one_shot: LiveOneShot) -> bool {
+    live_clip.playback_node == one_shot.editor_node
+        && live_clip.one_shot_lane == Some(one_shot.lane)
 }
 
 fn advance_transition_progress(
@@ -820,9 +833,9 @@ fn advance_one_shot_progress(
     delta_secs: f32,
 ) -> LiveOneShot {
     let duration = if one_shot.progress < one_shot.target {
-        one_shot_fade_in(editor, one_shot.editor_node)
+        one_shot_fade_in(editor, one_shot.editor_node, one_shot.lane)
     } else {
-        one_shot_fade_out(editor, one_shot.editor_node)
+        one_shot_fade_out(editor, one_shot.editor_node, one_shot.lane)
     };
 
     if duration <= f32::EPSILON {
@@ -862,13 +875,27 @@ fn one_shot_progress(
     editor: &AnimGraphEditor,
     live_one_shots: &[LiveOneShot],
     node: egui_graph_edit::NodeId,
+    lane: usize,
 ) -> f32 {
     live_one_shots
         .iter()
         .find_map(|one_shot| {
-            (one_shot.editor_node == node).then_some(one_shot.progress.clamp(0.0, 1.0))
+            (one_shot.editor_node == node && one_shot.lane == lane)
+                .then_some(one_shot.progress.clamp(0.0, 1.0))
         })
-        .unwrap_or_else(|| one_shot_target(editor, node))
+        .unwrap_or_else(|| one_shot_target(editor, node, lane))
+}
+
+fn one_shot_max_progress(
+    editor: &AnimGraphEditor,
+    live_one_shots: &[LiveOneShot],
+    node: egui_graph_edit::NodeId,
+) -> f32 {
+    live_one_shots
+        .iter()
+        .filter(|one_shot| one_shot.editor_node == node)
+        .map(|one_shot| one_shot.progress.clamp(0.0, 1.0))
+        .fold(one_shot_target(editor, node, 1), f32::max)
 }
 
 fn transition_condition_uses_any_trigger(
@@ -909,9 +936,11 @@ fn transition_condition_uses_trigger(
 fn one_shot_condition_uses_trigger(
     editor: &AnimGraphEditor,
     node: egui_graph_edit::NodeId,
+    lane: usize,
     trigger_name: &str,
 ) -> bool {
-    let Ok(input) = editor.graph.graph.nodes[node].get_input("Trigger") else {
+    let Ok(input) = editor.graph.graph.nodes[node].get_input(&one_shot_trigger_input_name(lane))
+    else {
         return false;
     };
     let Some(output) = editor.graph.graph.connection(input) else {
@@ -932,8 +961,8 @@ fn transition_target(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId) ->
     }
 }
 
-fn one_shot_target(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId) -> f32 {
-    if resolve_bool_input(editor, node, "Trigger").unwrap_or(false) {
+fn one_shot_target(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId, lane: usize) -> f32 {
+    if resolve_bool_input(editor, node, &one_shot_trigger_input_name(lane)).unwrap_or(false) {
         1.0
     } else {
         0.0
@@ -946,16 +975,57 @@ fn transition_duration(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId) 
         .max(MIN_TRANSITION_DURATION)
 }
 
-fn one_shot_fade_in(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId) -> f32 {
-    resolve_float_input(editor, node, "Fade In")
+fn one_shot_fade_in(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId, lane: usize) -> f32 {
+    resolve_float_input(editor, node, &one_shot_fade_in_input_name(lane))
         .unwrap_or(0.08)
         .max(MIN_TRANSITION_DURATION)
 }
 
-fn one_shot_fade_out(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId) -> f32 {
-    resolve_float_input(editor, node, "Fade Out")
+fn one_shot_fade_out(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId, lane: usize) -> f32 {
+    resolve_float_input(editor, node, &one_shot_fade_out_input_name(lane))
         .unwrap_or(0.12)
         .max(MIN_TRANSITION_DURATION)
+}
+
+fn live_clip_playback_settings(
+    editor: &AnimGraphEditor,
+    live_clip: LiveClipNode,
+) -> PlaybackSettings {
+    if let Some(lane) = live_clip.one_shot_lane {
+        return PlaybackSettings {
+            mode: node_input_text(
+                editor,
+                live_clip.playback_node,
+                &one_shot_playback_input_name(lane),
+            )
+            .and_then(|value| parse_live_playback_mode(&value))
+            .unwrap_or(PlaybackMode::OnceHold),
+            speed: 1.0,
+            start_offset_seconds: node_input_float(
+                editor,
+                live_clip.playback_node,
+                &one_shot_start_offset_input_name(lane),
+            )
+            .unwrap_or(0.0)
+            .max(0.0),
+        };
+    }
+
+    editor
+        .playback_settings(live_clip.playback_node)
+        .unwrap_or_default()
+}
+
+fn parse_live_playback_mode(value: &str) -> Option<PlaybackMode> {
+    match value.trim() {
+        "Loop" => Some(PlaybackMode::Loop),
+        "Once" => Some(PlaybackMode::Once),
+        "OnceHold" | "Once Hold" => Some(PlaybackMode::OnceHold),
+        "PingPong" | "Ping Pong" => Some(PlaybackMode::PingPong),
+        "PingPongOnce" | "Ping Pong Once" => Some(PlaybackMode::PingPongOnce),
+        "Manual" => Some(PlaybackMode::Manual),
+        _ => None,
+    }
 }
 
 pub fn clip_speed(editor: &AnimGraphEditor, clip_node: egui_graph_edit::NodeId) -> f32 {
@@ -1135,6 +1205,7 @@ fn compile_source_node(
     live_one_shots: &mut Vec<LiveOneShot>,
     playback_node: Option<egui_graph_edit::NodeId>,
     playback_animation: Option<AnimationNodeIndex>,
+    one_shot_lane: Option<usize>,
     weight_driver: Option<WeightDriver>,
 ) -> Result<AnimationNodeIndex, String> {
     let node_id = editor.graph.graph.get_output(output).node;
@@ -1162,6 +1233,7 @@ fn compile_source_node(
                 editor_node: node_id,
                 playback_node: playback_node.unwrap_or(node_id),
                 playback_animation: playback_animation.unwrap_or(node),
+                one_shot_lane,
                 animation: node,
             });
             Ok(node)
@@ -1190,6 +1262,7 @@ fn compile_source_node(
                 live_one_shots,
                 playback_node,
                 playback_animation,
+                one_shot_lane,
                 Some(WeightDriver::BlendA(node_id)),
             )?;
             compile_connected_input(
@@ -1208,6 +1281,7 @@ fn compile_source_node(
                 live_one_shots,
                 playback_node,
                 playback_animation,
+                one_shot_lane,
                 Some(WeightDriver::BlendB(node_id)),
             )?;
             Ok(blend)
@@ -1236,6 +1310,7 @@ fn compile_source_node(
                 live_one_shots,
                 playback_node,
                 playback_animation,
+                one_shot_lane,
                 Some(WeightDriver::WeightedBlendA(node_id)),
             )?;
             compile_connected_input(
@@ -1254,6 +1329,7 @@ fn compile_source_node(
                 live_one_shots,
                 playback_node,
                 playback_animation,
+                one_shot_lane,
                 Some(WeightDriver::WeightedBlendB(node_id)),
             )?;
             Ok(blend)
@@ -1261,12 +1337,16 @@ fn compile_source_node(
         AnimNodeTemplate::OneShot => {
             let one_shot = graph.add_blend(initial_weight, parent);
             native_node_names.push((one_shot, format!("One Shot: {}", node.label)));
-            live_one_shots.push(LiveOneShot {
-                editor_node: node_id,
-                progress: one_shot_target(editor, node_id),
-                target: one_shot_target(editor, node_id),
-                restart_requested: false,
-            });
+            let lanes = one_shot_lanes(&editor.graph.graph, node_id);
+            for lane in lanes.iter().copied() {
+                live_one_shots.push(LiveOneShot {
+                    editor_node: node_id,
+                    lane,
+                    progress: one_shot_target(editor, node_id, lane),
+                    target: one_shot_target(editor, node_id, lane),
+                    restart_requested: false,
+                });
+            }
             if let Some(driver) = weight_driver {
                 live_node_weights.push(LiveNodeWeight {
                     animation: one_shot,
@@ -1289,26 +1369,30 @@ fn compile_source_node(
                 live_one_shots,
                 playback_node,
                 playback_animation,
+                one_shot_lane,
                 Some(WeightDriver::OneShotBase(node_id)),
             )?;
-            compile_connected_input(
-                editor,
-                gltf,
-                node_id,
-                "Action",
-                graph,
-                one_shot,
-                playable_nodes,
-                playable_names,
-                native_node_names,
-                live_clips,
-                live_node_weights,
-                live_transitions,
-                live_one_shots,
-                Some(node_id),
-                Some(one_shot),
-                Some(WeightDriver::OneShotAction(node_id)),
-            )?;
+            for lane in lanes {
+                compile_connected_input(
+                    editor,
+                    gltf,
+                    node_id,
+                    &one_shot_action_input_name(lane),
+                    graph,
+                    one_shot,
+                    playable_nodes,
+                    playable_names,
+                    native_node_names,
+                    live_clips,
+                    live_node_weights,
+                    live_transitions,
+                    live_one_shots,
+                    Some(node_id),
+                    Some(one_shot),
+                    Some(lane),
+                    Some(WeightDriver::OneShotAction(node_id, lane)),
+                )?;
+            }
             Ok(one_shot)
         }
         AnimNodeTemplate::State => {
@@ -1336,6 +1420,7 @@ fn compile_source_node(
                 live_one_shots,
                 Some(node_id),
                 Some(state),
+                None,
                 None,
             )?;
             Ok(state)
@@ -1369,6 +1454,7 @@ fn compile_source_node(
                 live_one_shots,
                 playback_node,
                 playback_animation,
+                one_shot_lane,
                 Some(WeightDriver::TransitionFrom(node_id)),
             )?;
             compile_connected_input(
@@ -1387,6 +1473,7 @@ fn compile_source_node(
                 live_one_shots,
                 playback_node,
                 playback_animation,
+                one_shot_lane,
                 Some(WeightDriver::TransitionTo(node_id)),
             )?;
             Ok(transition)
@@ -1421,6 +1508,7 @@ fn compile_connected_input(
     live_one_shots: &mut Vec<LiveOneShot>,
     playback_node: Option<egui_graph_edit::NodeId>,
     playback_animation: Option<AnimationNodeIndex>,
+    one_shot_lane: Option<usize>,
     weight_driver: Option<WeightDriver>,
 ) -> Result<AnimationNodeIndex, String> {
     let input = editor.graph.graph.nodes[node]
@@ -1446,16 +1534,16 @@ fn compile_connected_input(
         live_one_shots,
         playback_node,
         playback_animation,
+        one_shot_lane,
         weight_driver,
     )
 }
 
 fn preview_output_node(editor: &AnimGraphEditor) -> Option<egui_graph_edit::NodeId> {
-    editor.preview_output.or_else(|| {
-        editor.graph.graph.nodes.iter().find_map(|(id, node)| {
-            matches!(node.user_data.template, AnimNodeTemplate::Output).then_some(id)
-        })
-    })
+    editor
+        .preview_output
+        .filter(|node_id| editor.is_output_node(*node_id))
+        .or_else(|| editor.first_output_node())
 }
 
 fn append_output_signature(
@@ -1487,7 +1575,14 @@ fn append_output_signature(
         }
         AnimNodeTemplate::OneShot => {
             append_connected_signature(editor, node_id, "Base", signature);
-            append_connected_signature(editor, node_id, "Action", signature);
+            for lane in one_shot_lanes(&editor.graph.graph, node_id) {
+                append_connected_signature(
+                    editor,
+                    node_id,
+                    &one_shot_action_input_name(lane),
+                    signature,
+                );
+            }
         }
         AnimNodeTemplate::State => {
             signature.push_str("state:");
