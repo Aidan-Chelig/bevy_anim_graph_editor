@@ -22,7 +22,7 @@ use one_shot::{
 };
 pub use one_shot::{
     one_shot_action_input_name, one_shot_fade_in_input_name, one_shot_fade_out_input_name,
-    one_shot_lane_count, one_shot_lanes, one_shot_playback_input_name,
+    one_shot_lane_count, one_shot_lanes, one_shot_playback_input_name, one_shot_speed_input_name,
     one_shot_start_offset_input_name, one_shot_trigger_input_name,
 };
 
@@ -686,6 +686,17 @@ impl AnimGraphEditor {
                     .filter_map(|(name, input)| is_one_shot_fade_input(name).then_some(*input))
             })
             .collect();
+        let weight_inputs: Vec<_> = self
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .flat_map(|(_, node)| {
+                node.inputs.iter().filter_map(|(name, input)| {
+                    is_weight_input(node.user_data.template, name).then_some(*input)
+                })
+            })
+            .collect();
 
         for (input_id, input) in self.graph.graph.inputs.iter_mut() {
             if let AnimValue::Float(value) = &mut input.value {
@@ -695,7 +706,7 @@ impl AnimGraphEditor {
                     *value = value.max(MIN_TRANSITION_DURATION);
                 } else if start_offset_inputs.contains(&input_id) {
                     *value = value.max(0.0);
-                } else {
+                } else if weight_inputs.contains(&input_id) {
                     *value = value.clamp(0.0, 1.0);
                 }
             }
@@ -751,6 +762,7 @@ impl AnimGraphEditor {
                             &one_shot_playback_input_name(lane),
                             "OnceHold",
                         );
+                        self.ensure_float_input(node_id, &one_shot_speed_input_name(lane), 1.0);
                         self.ensure_float_input(
                             node_id,
                             &one_shot_start_offset_input_name(lane),
@@ -760,6 +772,7 @@ impl AnimGraphEditor {
                 }
                 AnimNodeTemplate::State => {
                     self.ensure_text_input(node_id, "Playback", "Loop");
+                    self.ensure_float_input(node_id, "Speed", 1.0);
                     self.ensure_float_input(node_id, "Start Offset", 0.0);
                     self.ensure_text_input(node_id, "On Complete", "Stay");
                 }
@@ -822,6 +835,14 @@ impl AnimGraphEditor {
         );
         self.graph.graph.add_input_param(
             node_id,
+            one_shot_speed_input_name(lane),
+            AnimDataType::Float,
+            AnimValue::Float(1.0),
+            InputParamKind::ConnectionOrConstant,
+            true,
+        );
+        self.graph.graph.add_input_param(
+            node_id,
             one_shot_start_offset_input_name(lane),
             AnimDataType::Float,
             AnimValue::Float(0.0),
@@ -859,12 +880,23 @@ impl AnimGraphEditor {
         let playback = self.graph.graph.nodes[node_id]
             .get_input(&one_shot_playback_input_name(lane))
             .ok();
+        let speed = self.graph.graph.nodes[node_id]
+            .get_input(&one_shot_speed_input_name(lane))
+            .ok();
         let start_offset = self.graph.graph.nodes[node_id]
             .get_input(&one_shot_start_offset_input_name(lane))
             .ok();
-        for input in [action, trigger, fade_in, fade_out, playback, start_offset]
-            .into_iter()
-            .flatten()
+        for input in [
+            action,
+            trigger,
+            fade_in,
+            fade_out,
+            playback,
+            speed,
+            start_offset,
+        ]
+        .into_iter()
+        .flatten()
         {
             self.graph.graph.remove_input_param(input);
         }
@@ -1056,9 +1088,11 @@ impl WidgetValueTrait for AnimValue {
                     {
                         ui.add(egui::DragValue::new(value).speed(0.01));
                         *value = value.max(0.0);
-                    } else {
+                    } else if is_weight_input(node_data.template, param_name) {
                         ui.add(egui::DragValue::new(value).speed(0.01).range(0.0..=1.0));
                         *value = value.clamp(0.0, 1.0);
+                    } else {
+                        ui.add(egui::DragValue::new(value).speed(0.01));
                     }
                 });
             }
@@ -1346,6 +1380,16 @@ fn edit_prefixed_value(ui: &mut egui::Ui, value: &mut String, prefix: &str) {
     }
 }
 
+fn is_weight_input(template: AnimNodeTemplate, param_name: &str) -> bool {
+    matches!(
+        (template, param_name),
+        (AnimNodeTemplate::Blend, "Weight")
+            | (AnimNodeTemplate::WeightedBlend, "A Weight")
+            | (AnimNodeTemplate::WeightedBlend, "B Weight")
+            | (AnimNodeTemplate::FloatTransition, "Weight")
+    )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnimNodeData {
     pub template: AnimNodeTemplate,
@@ -1506,7 +1550,8 @@ impl NodeDataTrait for AnimNodeData {
             AnimNodeTemplate::FloatParameter
             | AnimNodeTemplate::BoolParameter
             | AnimNodeTemplate::TriggerParameter => Color32::from_rgb(87, 105, 122),
-            AnimNodeTemplate::Remap
+            AnimNodeTemplate::FloatTransition
+            | AnimNodeTemplate::Remap
             | AnimNodeTemplate::Add
             | AnimNodeTemplate::Multiply
             | AnimNodeTemplate::Invert
@@ -1584,7 +1629,8 @@ fn node_header_value(
                 0.0
             }
         }
-        AnimNodeTemplate::Remap
+        AnimNodeTemplate::FloatTransition
+        | AnimNodeTemplate::Remap
         | AnimNodeTemplate::Add
         | AnimNodeTemplate::Multiply
         | AnimNodeTemplate::Invert
@@ -1883,6 +1929,7 @@ fn collect_pose_node_weights(
         AnimNodeTemplate::FloatParameter
         | AnimNodeTemplate::BoolParameter
         | AnimNodeTemplate::TriggerParameter
+        | AnimNodeTemplate::FloatTransition
         | AnimNodeTemplate::Remap
         | AnimNodeTemplate::Add
         | AnimNodeTemplate::Multiply
@@ -2142,6 +2189,18 @@ fn smoothstep_node_value(
     t * t * (3.0 - 2.0 * t)
 }
 
+fn float_transition_node_value(
+    graph: &Graph<AnimNodeData, AnimDataType, AnimValue>,
+    node: NodeId,
+) -> f32 {
+    let from = resolve_graph_float_input(graph, node, "From", 0).unwrap_or(0.0);
+    let to = resolve_graph_float_input(graph, node, "To", 0).unwrap_or(1.0);
+    let weight = resolve_graph_float_input(graph, node, "Weight", 0)
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    from + (to - from) * weight
+}
+
 fn compare_node_value(graph: &Graph<AnimNodeData, AnimDataType, AnimValue>, node: NodeId) -> bool {
     let value = resolve_graph_float_input(graph, node, "Value", 0).unwrap_or(0.0);
     let threshold = resolve_graph_float_input(graph, node, "Threshold", 0).unwrap_or(0.5);
@@ -2194,6 +2253,7 @@ fn resolve_graph_float_node(
 
     match graph.nodes[node].user_data.template {
         AnimNodeTemplate::FloatParameter => graph_node_input_float(graph, node, "Value"),
+        AnimNodeTemplate::FloatTransition => Some(float_transition_node_value(graph, node)),
         AnimNodeTemplate::Remap => {
             let value = resolve_graph_float_input(graph, node, "Value", depth + 1)?;
             remap_node_value(graph, node, value)
@@ -2318,7 +2378,7 @@ fn node_playback_settings(
         mode: graph_node_input_text(graph, node, "Playback")
             .and_then(parse_playback_mode)
             .unwrap_or_default(),
-        speed: graph_node_input_float(graph, node, "Speed").unwrap_or(1.0),
+        speed: resolve_graph_float_input(graph, node, "Speed", 0).unwrap_or(1.0),
         start_offset_seconds: graph_node_input_float(graph, node, "Start Offset")
             .unwrap_or(0.0)
             .max(0.0),
@@ -2440,6 +2500,7 @@ pub enum AnimNodeTemplate {
     FloatParameter,
     BoolParameter,
     TriggerParameter,
+    FloatTransition,
     Remap,
     Add,
     Multiply,
@@ -2466,7 +2527,8 @@ impl NodeTemplateTrait for AnimNodeTemplate {
             Self::Clip | Self::Blend | Self::WeightedBlend | Self::OneShot => "Pose",
             Self::State | Self::Transition => "State Machine",
             Self::FloatParameter | Self::BoolParameter | Self::TriggerParameter => "Parameters",
-            Self::Remap
+            Self::FloatTransition
+            | Self::Remap
             | Self::Add
             | Self::Multiply
             | Self::Invert
@@ -2643,6 +2705,14 @@ impl NodeTemplateTrait for AnimNodeTemplate {
                 );
                 graph.add_input_param(
                     node_id,
+                    "Speed".to_string(),
+                    AnimDataType::Float,
+                    AnimValue::Float(1.0),
+                    InputParamKind::ConnectionOrConstant,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
                     "Start Offset".to_string(),
                     AnimDataType::Float,
                     AnimValue::Float(0.0),
@@ -2674,6 +2744,14 @@ impl NodeTemplateTrait for AnimNodeTemplate {
                     AnimDataType::Text,
                     AnimValue::Text("Loop".to_string()),
                     InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Speed".to_string(),
+                    AnimDataType::Float,
+                    AnimValue::Float(1.0),
+                    InputParamKind::ConnectionOrConstant,
                     true,
                 );
                 graph.add_input_param(
@@ -2793,6 +2871,33 @@ impl NodeTemplateTrait for AnimNodeTemplate {
                     true,
                 );
                 graph.add_output_param(node_id, "Value".to_string(), AnimDataType::Bool);
+            }
+            Self::FloatTransition => {
+                graph.add_input_param(
+                    node_id,
+                    "From".to_string(),
+                    AnimDataType::Float,
+                    AnimValue::Float(0.0),
+                    InputParamKind::ConnectionOrConstant,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "To".to_string(),
+                    AnimDataType::Float,
+                    AnimValue::Float(1.0),
+                    InputParamKind::ConnectionOrConstant,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Weight".to_string(),
+                    AnimDataType::Float,
+                    AnimValue::Float(0.5),
+                    InputParamKind::ConnectionOrConstant,
+                    true,
+                );
+                graph.add_output_param(node_id, "Value".to_string(), AnimDataType::Float);
             }
             Self::Remap => {
                 graph.add_input_param(
@@ -2982,6 +3087,7 @@ impl AnimNodeTemplate {
         matches!(
             self,
             Self::FloatParameter
+                | Self::FloatTransition
                 | Self::Remap
                 | Self::Add
                 | Self::Multiply
@@ -3002,6 +3108,7 @@ impl AnimNodeTemplate {
             Self::FloatParameter => "Float Parameter",
             Self::BoolParameter => "Bool Parameter",
             Self::TriggerParameter => "Trigger Parameter",
+            Self::FloatTransition => "Float Transition",
             Self::Remap => "Remap 0..1",
             Self::Add => "Add",
             Self::Multiply => "Multiply",
@@ -3024,6 +3131,7 @@ impl AnimNodeTemplate {
             Self::FloatParameter => "Reads a numeric graph parameter.",
             Self::BoolParameter => "Reads a boolean graph parameter.",
             Self::TriggerParameter => "One-shot boolean parameter consumed after evaluation.",
+            Self::FloatTransition => "Interpolates between two floats by weight.",
             Self::Remap => "Maps a float range to a normalized 0..1 value.",
             Self::Add => "Adds two float values.",
             Self::Multiply => "Multiplies two float values.",
@@ -3053,6 +3161,7 @@ impl NodeTemplateIter for AnimNodeTemplates {
             AnimNodeTemplate::FloatParameter,
             AnimNodeTemplate::BoolParameter,
             AnimNodeTemplate::TriggerParameter,
+            AnimNodeTemplate::FloatTransition,
             AnimNodeTemplate::Remap,
             AnimNodeTemplate::Add,
             AnimNodeTemplate::Multiply,

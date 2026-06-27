@@ -8,7 +8,7 @@ use bevy_anim_graph_editor::{
     runtime,
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
-use egui_graph_edit::NodeResponse;
+use egui_graph_edit::{GraphEditorOptions, NodeResponse};
 
 mod app_io;
 mod edge_visualization;
@@ -282,11 +282,14 @@ fn editor_ui(
                 .and_then(|preview_state| preview::loaded_gltf(preview_state, &gltfs))
                 .map(preview::clip_names)
                 .unwrap_or_default();
-            let response = editor.graph.draw_graph_editor(
+            let response = editor.graph.draw_graph_editor_with_options(
                 ui,
                 editor.templates,
                 &mut editor.ui_state,
                 Vec::new(),
+                GraphEditorOptions {
+                    interactions_enabled: !ui.input(|input| input.modifiers.shift),
+                },
             );
             draw_connection_visualization(ui, editor, &response.connections, time.elapsed_secs());
 

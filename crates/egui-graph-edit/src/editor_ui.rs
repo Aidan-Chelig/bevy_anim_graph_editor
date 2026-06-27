@@ -85,6 +85,20 @@ pub struct ConnectionRenderInfo {
     pub color: Color32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct GraphEditorOptions {
+    /// When false, the graph is rendered but mouse-driven graph interactions are ignored.
+    pub interactions_enabled: bool,
+}
+
+impl Default for GraphEditorOptions {
+    fn default() -> Self {
+        Self {
+            interactions_enabled: true,
+        }
+    }
+}
+
 pub struct GraphNodeWidget<'a, NodeData, DataType, ValueType> {
     pub position: &'a mut Pos2,
     pub orientation: &'a mut NodeOrientation,
@@ -127,6 +141,24 @@ where
         user_state: &mut UserState,
         prepend_responses: Vec<NodeResponse<UserResponse, NodeData>>,
     ) -> GraphResponse<UserResponse, NodeData> {
+        self.draw_graph_editor_with_options(
+            ui,
+            all_kinds,
+            user_state,
+            prepend_responses,
+            GraphEditorOptions::default(),
+        )
+    }
+
+    #[must_use]
+    pub fn draw_graph_editor_with_options(
+        &mut self,
+        ui: &mut Ui,
+        all_kinds: impl NodeTemplateIter<Item = NodeTemplate>,
+        user_state: &mut UserState,
+        prepend_responses: Vec<NodeResponse<UserResponse, NodeData>>,
+        options: GraphEditorOptions,
+    ) -> GraphResponse<UserResponse, NodeData> {
         ui.set_clip_rect(ui.max_rect());
         let clip_rect = ui.clip_rect();
         // Zoom may have never taken place, so ensure we use parent style
@@ -136,9 +168,9 @@ where
         }
 
         // Zoom only within area where graph is shown
-        let suppress_mouse = ui.input(|i| i.modifiers.shift);
+        let interactions_enabled = options.interactions_enabled;
 
-        if ui.rect_contains_pointer(clip_rect) && !suppress_mouse {
+        if ui.rect_contains_pointer(clip_rect) && interactions_enabled {
             let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll_delta != 0.0 {
                 let zoom_delta = (scroll_delta * 0.002).exp();
@@ -149,7 +181,13 @@ where
         // Render graph zoomed
         let zoomed_style = self.pan_zoom.zoomed_style.clone();
         let graph_response = show_zoomed(ui.style().clone(), zoomed_style, ui, |ui| {
-            self.draw_graph_editor_inside_zoom(ui, all_kinds, user_state, prepend_responses)
+            self.draw_graph_editor_inside_zoom(
+                ui,
+                all_kinds,
+                user_state,
+                prepend_responses,
+                options,
+            )
         });
 
         graph_response
@@ -193,12 +231,13 @@ where
         all_kinds: impl NodeTemplateIter<Item = NodeTemplate>,
         user_state: &mut UserState,
         prepend_responses: Vec<NodeResponse<UserResponse, NodeData>>,
+        options: GraphEditorOptions,
     ) -> GraphResponse<UserResponse, NodeData> {
         // This causes the graph editor to use as much free space as it can.
         // (so for windows it will use up to the resizeably set limit
         // and for a Panel it will fill it completely)
         let editor_rect = ui.max_rect();
-        let suppress_mouse = ui.input(|i| i.modifiers.shift);
+        let interactions_enabled = options.interactions_enabled;
         let resp = ui.allocate_rect(editor_rect, Sense::hover());
 
         let cursor_pos = ui
@@ -228,13 +267,13 @@ where
 
         // Allocate rect before the nodes, otherwise this will block the interaction
         // with the nodes.
-        let background_sense = if suppress_mouse {
-            Sense::hover()
-        } else {
+        let background_sense = if interactions_enabled {
             Sense::click().union(Sense::drag())
+        } else {
+            Sense::hover()
         };
         let r = ui.allocate_rect(ui.min_rect(), background_sense);
-        if !suppress_mouse {
+        if interactions_enabled {
             if r.drag_started() {
                 drag_started_on_background = true;
             } else if r.drag_stopped() {
@@ -257,7 +296,7 @@ where
             }
             .show(&self.pan_zoom, ui, user_state);
 
-            if !suppress_mouse {
+            if interactions_enabled {
                 // Actions executed later
                 delayed_responses.extend(responses);
             }
@@ -446,7 +485,7 @@ where
         // are stored here to report them back to the user.
         let mut extra_responses: Vec<NodeResponse<UserResponse, NodeData>> = Vec::new();
 
-        if !suppress_mouse {
+        if interactions_enabled {
             for response in delayed_responses.iter() {
                 match response {
                     NodeResponse::ConnectEventStarted(node_id, port) => {
@@ -516,7 +555,7 @@ where
         }
 
         // Handle box selection
-        if let Some(box_start) = (!suppress_mouse)
+        if let Some(box_start) = interactions_enabled
             .then_some(self.ongoing_box_selection)
             .flatten()
         {
@@ -553,7 +592,7 @@ where
         // This locks the context, so don't hold on to it for too long.
         let mouse = &ui.ctx().input(|i| i.pointer.clone());
 
-        if !suppress_mouse {
+        if interactions_enabled {
             if mouse.any_released() && self.connection_in_progress.is_some() {
                 self.connection_in_progress = None;
             }
@@ -566,20 +605,20 @@ where
             self.node_finder = None;
         }
 
-        if !suppress_mouse && r.dragged() && ui.ctx().input(|i| i.pointer.middle_down()) {
+        if interactions_enabled && r.dragged() && ui.ctx().input(|i| i.pointer.middle_down()) {
             self.pan_zoom.pan += ui.ctx().input(|i| i.pointer.delta());
         }
 
         // Deselect and deactivate finder if the editor background is clicked.
-        if !suppress_mouse && r.clicked() && !cursor_in_finder {
+        if interactions_enabled && r.clicked() && !cursor_in_finder {
             self.selected_nodes = Vec::new();
             self.node_finder = None;
         }
 
-        if !suppress_mouse && drag_started_on_background && mouse.primary_down() {
+        if interactions_enabled && drag_started_on_background && mouse.primary_down() {
             self.ongoing_box_selection = Some(cursor_pos);
         }
-        if !suppress_mouse && (mouse.primary_released() || drag_released_on_background) {
+        if interactions_enabled && (mouse.primary_released() || drag_released_on_background) {
             self.ongoing_box_selection = None;
         }
 
@@ -1075,14 +1114,22 @@ where
                 .user_data
                 .border_color(ui, self.node_id, self.graph, user_state);
             let outline = if self.selected || outline_color.is_some() {
-                let fill = if self.selected {
-                    Color32::WHITE.lighten(0.8)
+                let (fill, width) = if self.selected {
+                    (Color32::WHITE.lighten(0.8), 1.0)
                 } else {
-                    outline_color.unwrap()
+                    (
+                        outline_color.unwrap(),
+                        self.graph[self.node_id].user_data.border_width(
+                            ui,
+                            self.node_id,
+                            self.graph,
+                            user_state,
+                        ),
+                    )
                 };
                 Shape::Rect(RectShape {
                     blur_width: 0.0,
-                    rect: node_rect.expand(2.0 * pan_zoom.zoom),
+                    rect: node_rect.expand(width.max(0.0) * pan_zoom.zoom),
                     corner_radius,
                     fill,
                     stroke: Stroke::NONE,

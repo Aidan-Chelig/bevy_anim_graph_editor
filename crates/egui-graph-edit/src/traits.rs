@@ -170,6 +170,18 @@ where
         None
     }
 
+    /// Set the width of a custom outer border.
+    /// This is only used when `border_color` returns `Some`.
+    fn border_width(
+        &self,
+        _ui: &egui::Ui,
+        _node_id: NodeId,
+        _graph: &Graph<Self, Self::DataType, Self::ValueType>,
+        _user_state: &mut Self::UserState,
+    ) -> f32 {
+        2.0
+    }
+
     /// Separator to put between elements in the node.
     ///
     /// Invoked between inputs, outputs and bottom UI. Useful for

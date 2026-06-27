@@ -10,7 +10,8 @@ use crate::animation_graph::{
     AnimGraphEditor, AnimNodeTemplate, AnimValue, CompletionAction, MIN_TRANSITION_DURATION,
     PlaybackMode, PlaybackSettings, SavedAnimGraph, one_shot_action_input_name,
     one_shot_fade_in_input_name, one_shot_fade_out_input_name, one_shot_lanes,
-    one_shot_playback_input_name, one_shot_start_offset_input_name, one_shot_trigger_input_name,
+    one_shot_playback_input_name, one_shot_speed_input_name, one_shot_start_offset_input_name,
+    one_shot_trigger_input_name,
 };
 
 pub struct AnimGraphRuntimePlugin;
@@ -1000,7 +1001,12 @@ fn live_clip_playback_settings(
             )
             .and_then(|value| parse_live_playback_mode(&value))
             .unwrap_or(PlaybackMode::OnceHold),
-            speed: 1.0,
+            speed: resolve_float_input(
+                editor,
+                live_clip.playback_node,
+                &one_shot_speed_input_name(lane),
+            )
+            .unwrap_or(1.0),
             start_offset_seconds: node_input_float(
                 editor,
                 live_clip.playback_node,
@@ -1029,7 +1035,7 @@ fn parse_live_playback_mode(value: &str) -> Option<PlaybackMode> {
 }
 
 pub fn clip_speed(editor: &AnimGraphEditor, clip_node: egui_graph_edit::NodeId) -> f32 {
-    node_input_float(editor, clip_node, "Speed")
+    resolve_float_input(editor, clip_node, "Speed")
         .unwrap_or(1.0)
         .max(0.0)
 }
@@ -1482,6 +1488,7 @@ fn compile_source_node(
         | AnimNodeTemplate::BoolParameter
         | AnimNodeTemplate::TriggerParameter
         | AnimNodeTemplate::Remap
+        | AnimNodeTemplate::FloatTransition
         | AnimNodeTemplate::Add
         | AnimNodeTemplate::Multiply
         | AnimNodeTemplate::Invert
@@ -1598,6 +1605,7 @@ fn append_output_signature(
         | AnimNodeTemplate::BoolParameter
         | AnimNodeTemplate::TriggerParameter
         | AnimNodeTemplate::Remap
+        | AnimNodeTemplate::FloatTransition
         | AnimNodeTemplate::Add
         | AnimNodeTemplate::Multiply
         | AnimNodeTemplate::Invert
@@ -1723,6 +1731,14 @@ fn resolve_float_output(
 fn resolve_float_node(editor: &AnimGraphEditor, node: egui_graph_edit::NodeId) -> Option<f32> {
     match editor.graph.graph.nodes[node].user_data.template {
         AnimNodeTemplate::FloatParameter => node_input_float(editor, node, "Value"),
+        AnimNodeTemplate::FloatTransition => {
+            let from = resolve_float_input(editor, node, "From").unwrap_or(0.0);
+            let to = resolve_float_input(editor, node, "To").unwrap_or(1.0);
+            let weight = resolve_float_input(editor, node, "Weight")
+                .unwrap_or(0.5)
+                .clamp(0.0, 1.0);
+            Some(from + (to - from) * weight)
+        }
         AnimNodeTemplate::Remap => {
             let value = resolve_float_input(editor, node, "Value")?;
             let in_min = node_input_float(editor, node, "In Min").unwrap_or(0.0);

@@ -70,6 +70,14 @@ pub fn one_shot_playback_input_name(lane: usize) -> String {
     }
 }
 
+pub fn one_shot_speed_input_name(lane: usize) -> String {
+    if lane <= 1 {
+        "Speed".to_string()
+    } else {
+        format!("Speed {lane}")
+    }
+}
+
 pub fn one_shot_start_offset_input_name(lane: usize) -> String {
     if lane <= 1 {
         "Start Offset".to_string()
