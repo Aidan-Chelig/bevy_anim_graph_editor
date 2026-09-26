@@ -86,10 +86,16 @@ impl EmbeddedAnimGraphEditor {
 
         let available = ui.available_size();
         let inspector_width = 250.0_f32.min((available.x * 0.35).max(180.0));
+        let orbiting = ui.ctx().input(|input| input.modifiers.shift);
         ui.horizontal(|ui| {
             let graph_width =
                 (available.x - inspector_width - ui.spacing().item_spacing.x).max(1.0);
-            ui.allocate_ui(egui::vec2(graph_width, available.y), |ui| self.graph_ui(ui));
+            ui.allocate_ui(egui::vec2(graph_width, available.y), |ui| {
+                // Node widgets can mutate their values directly, even when the
+                // graph editor ignores its own selection/drag responses. Disable
+                // the whole graph UI while the camera owns Shift gestures.
+                ui.add_enabled_ui(!orbiting, |ui| self.graph_ui(ui, !orbiting));
+            });
             ui.separator();
             ui.allocate_ui(egui::vec2(inspector_width, available.y), |ui| {
                 self.inspector_ui(ui)
@@ -119,7 +125,7 @@ impl EmbeddedAnimGraphEditor {
         self.file_candidates.clear();
     }
 
-    fn graph_ui(&mut self, ui: &mut Ui) {
+    fn graph_ui(&mut self, ui: &mut Ui, interactions_enabled: bool) {
         self.editor.ui_state.preview_output = self.editor.preview_output;
         self.editor.ui_state.one_shot_action_clip_labels =
             self.editor.one_shot_action_clip_labels();
@@ -128,7 +134,9 @@ impl EmbeddedAnimGraphEditor {
             self.editor.templates,
             &mut self.editor.ui_state,
             Vec::new(),
-            GraphEditorOptions::default(),
+            GraphEditorOptions {
+                interactions_enabled,
+            },
         );
         for event in response.node_responses {
             match event {
