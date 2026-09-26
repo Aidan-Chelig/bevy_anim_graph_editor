@@ -1,12 +1,10 @@
 use std::{fs, io, path::Path, time::Duration};
 
-use bevy::{gltf::Gltf, prelude::*};
-use bevy_anim_graph_editor::{
+use crate::{
     animation_graph::AnimGraphEditor,
     runtime::{self, LiveClipNode, LiveNodeWeight, LiveOneShot, LiveTransition},
 };
-
-use crate::app_io::apply_startup_input;
+use bevy::{gltf::Gltf, prelude::*};
 
 const IMPORT_DIR: &str = "assets/imports";
 
@@ -18,21 +16,20 @@ pub struct PreviewPlugin;
 
 impl Plugin for PreviewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (setup_preview_scene, apply_startup_input).chain())
-            .add_systems(
-                Update,
-                (
-                    build_preview_animation_graph,
-                    reload_preview_scene,
-                    update_preview_diagnostics,
-                    attach_preview_animation_graph,
-                    apply_editor_graph_to_preview,
-                    sync_editor_graph_to_preview,
-                    control_preview_camera,
-                    cycle_preview_animation,
-                    toggle_preview_playback,
-                ),
-            );
+        app.add_systems(Startup, setup_preview_scene).add_systems(
+            Update,
+            (
+                build_preview_animation_graph,
+                reload_preview_scene,
+                update_preview_diagnostics,
+                attach_preview_animation_graph,
+                apply_editor_graph_to_preview,
+                sync_editor_graph_to_preview,
+                control_preview_camera,
+                cycle_preview_animation,
+                toggle_preview_playback,
+            ),
+        );
     }
 }
 

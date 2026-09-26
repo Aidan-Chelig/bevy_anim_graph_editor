@@ -7,6 +7,23 @@ use egui::{self, Ui};
 use egui_graph_edit::{GraphEditorOptions, NodeResponse, NodeTemplateTrait};
 
 use crate::animation_graph::{AnimGraphEditor, AnimGraphResponse, AnimNodeTemplate};
+#[cfg(feature = "standalone")]
+use crate::{inspector, preview::PreviewState};
+#[cfg(feature = "standalone")]
+use bevy::{
+    gltf::Gltf,
+    prelude::{AnimationGraph, Assets},
+};
+
+#[cfg(feature = "standalone")]
+pub struct EmbeddedPreview<'a> {
+    pub state: &'a mut PreviewState,
+    pub gltfs: &'a Assets<Gltf>,
+    pub graphs: &'a Assets<AnimationGraph>,
+}
+
+#[cfg(not(feature = "standalone"))]
+pub struct EmbeddedPreview<'a>(std::marker::PhantomData<&'a ()>);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FileAction {
@@ -50,6 +67,26 @@ impl EmbeddedAnimGraphEditor {
     /// `assets_root` is the host project's asset folder. External GLBs are
     /// copied into `imports/` so project paths remain usable by Bevy.
     pub fn ui(&mut self, ui: &mut Ui, assets_root: Option<&Path>) {
+        self.ui_impl(ui, assets_root, None);
+    }
+
+    #[cfg(feature = "standalone")]
+    pub fn ui_with_preview(
+        &mut self,
+        ui: &mut Ui,
+        assets_root: Option<&Path>,
+        preview: EmbeddedPreview<'_>,
+    ) {
+        self.ui_impl(ui, assets_root, Some(preview));
+    }
+
+    #[allow(unused_variables, unused_mut)]
+    fn ui_impl(
+        &mut self,
+        ui: &mut Ui,
+        assets_root: Option<&Path>,
+        mut preview: Option<EmbeddedPreview<'_>>,
+    ) {
         self.editor.sanitize_after_graph_change();
         ui.horizontal_wrapped(|ui| {
             if ui.button("New").clicked() {
@@ -90,16 +127,39 @@ impl EmbeddedAnimGraphEditor {
         ui.horizontal(|ui| {
             let graph_width =
                 (available.x - inspector_width - ui.spacing().item_spacing.x).max(1.0);
-            ui.allocate_ui(egui::vec2(graph_width, available.y), |ui| {
-                // Node widgets can mutate their values directly, even when the
-                // graph editor ignores its own selection/drag responses. Disable
-                // the whole graph UI while the camera owns Shift gestures.
-                ui.add_enabled_ui(!orbiting, |ui| self.graph_ui(ui, !orbiting));
-            });
+            ui.allocate_ui_with_layout(
+                egui::vec2(graph_width, available.y),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    // Node widgets can mutate their values directly, even when the
+                    // graph editor ignores its own selection/drag responses. Disable
+                    // the whole graph UI while the camera owns Shift gestures.
+                    ui.add_enabled_ui(!orbiting, |ui| self.graph_ui(ui, !orbiting));
+                },
+            );
             ui.separator();
-            ui.allocate_ui(egui::vec2(inspector_width, available.y), |ui| {
-                self.inspector_ui(ui)
-            });
+            ui.allocate_ui_with_layout(
+                egui::vec2(inspector_width, available.y),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    #[cfg(feature = "standalone")]
+                    if let Some(preview) = preview.as_mut() {
+                        egui::ScrollArea::vertical()
+                            .id_salt("embedded_anim_graph_inspector")
+                            .show(ui, |ui| {
+                                inspector::draw_inspector(
+                                    ui,
+                                    &mut self.editor,
+                                    Some(&mut *preview.state),
+                                    preview.gltfs,
+                                    preview.graphs,
+                                );
+                            });
+                        return;
+                    }
+                    self.inspector_ui(ui);
+                },
+            );
         });
         self.file_action_ui(ui.ctx(), assets_root);
     }
