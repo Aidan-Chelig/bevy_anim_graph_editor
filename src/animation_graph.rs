@@ -5,8 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bevy::prelude::Resource;
-use bevy_egui::egui::{self, Color32};
+use egui::{self, Color32};
 use egui_graph_edit::{
     AnyParameterId, DataTypeTrait, Graph, GraphEditorState, InputId, InputParamKind, NodeDataTrait,
     NodeId, NodeResponse, NodeTemplateIter, NodeTemplateTrait, OutputId, UserResponseTrait,
@@ -31,7 +30,7 @@ pub type EditorState =
 
 pub const MIN_TRANSITION_DURATION: f32 = 0.001;
 
-#[derive(Resource)]
+#[cfg_attr(feature = "standalone", derive(bevy::prelude::Resource))]
 pub struct AnimGraphEditor {
     pub graph: EditorState,
     pub ui_state: AnimGraphUiState,

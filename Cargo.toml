@@ -7,8 +7,13 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[[bin]]
+name = "bevy_anim_graph_editor"
+path = "src/main.rs"
+required-features = ["standalone"]
+
 [dependencies]
-bevy = { version = "0.18.0", default-features = true, features = [
+bevy = { version = "0.18.0", optional = true, default-features = true, features = [
   "bevy_winit",
   "bevy_render",
   "bevy_core_pipeline",
@@ -27,8 +32,10 @@ bevy = { version = "0.18.0", default-features = true, features = [
   "x11",
   "wayland",
 ] }
-bevy_egui = { version = "0.39.1", features = ["serde"] }
+bevy_egui = { version = "0.39.1", optional = true, features = ["serde"] }
+egui = { version = "0.33.3", features = ["serde"] }
 egui-graph-edit = { version = "0.8.0", features = ["persistence"] }
+gltf = { version = "1.4", default-features = false, features = ["names"] }
 
 clap = { version = "4.5", features = ["derive"] }
 ron = "0.12"
@@ -54,7 +61,9 @@ egui-graph-edit = { path = "crates/egui-graph-edit" }
 
 [features]
 default = ["dev_native"]
+standalone = ["dep:bevy", "dep:bevy_egui"]
 dev = [
+  "standalone",
   "bevy/dynamic_linking",
   "bevy/bevy_dev_tools",
   "bevy/bevy_ui_debug",
